@@ -29,6 +29,9 @@ const DeviceStateSchema = new mongoose.Schema({
   device:    { type: String, unique: true },
   light_on:  { type: Boolean, default: false },
   fan_on:    { type: Boolean, default: false },
+  temp:      Number,
+  humidity:  Number,
+  motion:    Boolean,
   updatedAt: { type: Date, default: Date.now },
 });
 const DeviceState = mongoose.model("DeviceState", DeviceStateSchema);
@@ -75,10 +78,17 @@ mqttClient.on("message", async (topic, payload) => {
     try {
       await Reading.create(reading);
       await DeviceState.findOneAndUpdate(
-        { device },
-        { light_on: data.light_on, fan_on: data.fan_on, updatedAt: new Date() },
-        { upsert: true }
-      );
+  { device },
+  {
+    light_on: data.light_on,
+    fan_on: data.fan_on,
+    temp: data.temp,
+    humidity: data.humidity,
+    motion: data.motion,
+    updatedAt: new Date()
+  },
+  { upsert: true }
+);
     } catch (e) { console.error("DB write error:", e.message); }
 
     // Push live data to dashboard via Socket.IO
