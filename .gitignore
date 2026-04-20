@@ -6,3 +6,14 @@ node_modules/
 
 #Models
 *.pkl
+
+#venv
+venv/
+
+#Build and Python cache
+dist/
+__pycache__/
+
+.codex
+
+requirements.txt

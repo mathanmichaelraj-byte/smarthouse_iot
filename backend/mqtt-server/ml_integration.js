@@ -1,91 +1,104 @@
 /**
- * ml_integration.js
- * Bridges Node.js to Python ML models via child_process.
- * Falls back gracefully if Python/models are unavailable.
+ * Bridges Node.js to the Python ML scripts.
  */
 
-const { PythonShell } = require("python-shell");
+const fs = require("fs");
 const path = require("path");
+const { PythonShell } = require("python-shell");
 
 const ML_DIR = path.join(__dirname, "../python-ml");
+const LOCAL_VENV_PYTHON = path.join(ML_DIR, "venv", "bin", "python");
+const PYTHON_PATH = process.env.PYTHON_PATH || (fs.existsSync(LOCAL_VENV_PYTHON) ? LOCAL_VENV_PYTHON : "python3");
+const RETRAIN_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const RETRAIN_DEBOUNCE_MS = 5 * 60 * 1000;
 
-// ─── PREDICT DEVICE ACTION ───────────────────────────────
-/**
- * Call the Decision Tree model to predict whether light should be ON.
- * @param {{ temp, humidity, motion }} data
- * @returns {Promise<{ light_on: boolean } | null>}
- */
-async function predictDeviceAction(data) {
-  return new Promise((resolve) => {
-    const options = {
-      mode:        "json",
-      pythonPath:  "python3",
-      scriptPath:  ML_DIR,
-      args: [
-        data.temp     ?? 25,
-        data.humidity ?? 50,
-        data.motion   ? 1 : 0,
-        new Date().getHours(),
-      ],
-    };
+let retrainTimer = null;
 
-    PythonShell.run("predict.py", options, (err, results) => {
-      if (err) {
-        // Model not yet trained or python unavailable – skip
-        resolve(null);
-        return;
+function runJsonScript(script, args) {
+  return new Promise((resolve, reject) => {
+    PythonShell.run(
+      script,
+      {
+        mode: "json",
+        pythonPath: PYTHON_PATH,
+        scriptPath: ML_DIR,
+        args,
+      },
+      (error, results) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(results?.[0] ?? null);
       }
-      const result = results?.[0];
-      resolve(result ?? null);
-    });
+    );
   });
 }
 
-// ─── ANOMALY DETECTION ───────────────────────────────────
-/**
- * Call the Isolation Forest model to flag anomalies.
- * @param {{ temp, humidity, motion }} data
- * @returns {Promise<boolean>}  true = anomaly detected
- */
+function toFeatureArgs({ temp, humidity, motion, hour }) {
+  return [
+    temp ?? 25,
+    humidity ?? 50,
+    motion ? 1 : 0,
+    hour ?? new Date().getHours(),
+  ];
+}
+
+async function predictDeviceAction(data) {
+  try {
+    return await runJsonScript("predict.py", toFeatureArgs(data));
+  } catch (error) {
+    console.warn("[ML] Prediction unavailable:", error.message);
+    return null;
+  }
+}
+
 async function detectAnomaly(data) {
-  return new Promise((resolve) => {
-    const options = {
-      mode:        "json",
-      pythonPath:  "python3",
-      scriptPath:  ML_DIR,
-      args: [
-        data.temp     ?? 25,
-        data.humidity ?? 50,
-        data.motion   ? 1 : 0,
-      ],
-    };
-
-    PythonShell.run("anomaly.py", options, (err, results) => {
-      if (err) { resolve(false); return; }
-      const anomaly = results?.[0]?.anomaly === true;
-      resolve(anomaly);
-    });
-  });
+  try {
+    const result = await runJsonScript("anomaly.py", toFeatureArgs(data));
+    return result ?? { anomaly: false, score: 0 };
+  } catch (error) {
+    console.warn("[ML] Anomaly detection unavailable:", error.message);
+    return { anomaly: false, score: 0 };
+  }
 }
 
-// ─── RETRAIN (called periodically or on demand) ──────────
-/**
- * Trigger model retraining from MongoDB export.
- * @returns {Promise<void>}
- */
 async function retrainModels() {
   return new Promise((resolve, reject) => {
-    PythonShell.run("train.py", { pythonPath: "python3", scriptPath: ML_DIR }, (err) => {
-      if (err) { console.error("[ML] Retrain failed:", err.message); reject(err); return; }
-      console.log("[ML] Models retrained successfully.");
-      resolve();
-    });
+    PythonShell.run(
+      "train.py",
+      {
+        pythonPath: PYTHON_PATH,
+        scriptPath: ML_DIR,
+      },
+      (error) => {
+        if (error) {
+          console.error("[ML] Retrain failed:", error.message);
+          reject(error);
+          return;
+        }
+        console.log("[ML] Models retrained successfully.");
+        resolve();
+      }
+    );
   });
 }
 
-// Retrain every 6 hours
+function scheduleRetrain() {
+  if (retrainTimer) clearTimeout(retrainTimer);
+  retrainTimer = setTimeout(() => {
+    retrainModels().catch(() => {});
+    retrainTimer = null;
+  }, RETRAIN_DEBOUNCE_MS);
+}
+
 setInterval(() => {
   retrainModels().catch(() => {});
-}, 6 * 60 * 60 * 1000);
+}, RETRAIN_INTERVAL_MS);
 
-module.exports = { predictDeviceAction, detectAnomaly, retrainModels };
+module.exports = {
+  detectAnomaly,
+  predictDeviceAction,
+  retrainModels,
+  scheduleRetrain,
+};

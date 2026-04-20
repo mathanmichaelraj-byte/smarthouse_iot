@@ -1,45 +1,62 @@
 """
-anomaly.py
-Called by ml_integration.js with args: temp humidity motion
-Outputs JSON: { "anomaly": true/false, "score": float }
+Anomaly detection for the smart home sensor stream.
+
+Args: temp humidity motion hour
+Output: { "anomaly": bool, "score": float }
 """
-import sys
+
 import json
-import pickle
 import os
+import pickle
+import sys
+
 
 MODEL_FILE = os.path.join(os.path.dirname(__file__), "model_iso_forest.pkl")
 
+
+def emit_default():
+    print(json.dumps({"anomaly": False, "score": 0.0}))
+
+
 def main():
     if not os.path.exists(MODEL_FILE):
-        print(json.dumps({"anomaly": False, "score": 0}))
+        emit_default()
         return
 
     args = sys.argv[1:]
-    if len(args) < 3:
-        print(json.dumps({"anomaly": False, "score": 0}))
+    if len(args) < 4:
+        emit_default()
         return
 
     try:
-        temp     = float(args[0])
+        temp = float(args[0])
         humidity = float(args[1])
-        motion   = int(args[2])
+        motion = int(args[2])
+        hour = int(args[3])
     except ValueError:
-        print(json.dumps({"anomaly": False, "score": 0}))
+        emit_default()
         return
 
-    with open(MODEL_FILE, "rb") as f:
-        iso = pickle.load(f)
+    try:
+        with open(MODEL_FILE, "rb") as handle:
+            model = pickle.load(handle)
+    except Exception:
+        emit_default()
+        return
 
-    X = [[temp, humidity, motion]]
-    label = iso.predict(X)[0]      # -1 = anomaly, 1 = normal
-    score = iso.score_samples(X)[0]
+    features = [[temp, humidity, motion, hour]]
+    label = model.predict(features)[0]
+    score = model.score_samples(features)[0]
 
-    result = {
-        "anomaly": bool(label == -1),
-        "score":   round(float(score), 4),
-    }
-    print(json.dumps(result))
+    print(
+        json.dumps(
+            {
+                "anomaly": bool(label == -1),
+                "score": round(float(score), 4),
+            }
+        )
+    )
+
 
 if __name__ == "__main__":
     main()

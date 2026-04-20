@@ -1,104 +1,198 @@
 """
-train.py
-Trains two models on collected sensor data:
-  1. DecisionTreeClassifier  – predicts whether to turn light ON
-  2. IsolationForest         – flags anomalous readings
+Train smart-home control and anomaly models.
 
-Run:  python3 train.py
+Control model:
+  Features -> [temp, humidity, motion, hour]
+  Targets  -> [light1, light2, fan1, fan2]
+
+Anomaly model:
+  Features -> [temp, humidity, motion, hour]
 """
 
-import os
 import json
+import os
 import pickle
-import numpy as np
-import pandas as pd
-from sklearn.tree import DecisionTreeClassifier
-from sklearn.ensemble import IsolationForest
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report
+import sys
 
-# ─── CONFIG ──────────────────────────────────────────────
-DATA_FILE       = os.path.join(os.path.dirname(__file__), "train_data.json")
-DT_MODEL_FILE   = os.path.join(os.path.dirname(__file__), "model_decision_tree.pkl")
-ISO_MODEL_FILE  = os.path.join(os.path.dirname(__file__), "model_iso_forest.pkl")
+try:
+    import numpy as np
+    import pandas as pd
+    from sklearn.ensemble import IsolationForest
+    from sklearn.metrics import classification_report
+    from sklearn.model_selection import train_test_split
+    from sklearn.tree import DecisionTreeClassifier
+except ModuleNotFoundError as error:
+    print(
+        "[TRAIN] Missing Python dependency: {}. Install packages from requirements.txt before training.".format(
+            error.name
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
-# ─── LOAD DATA ───────────────────────────────────────────
+
+DATA_FILE = os.path.join(os.path.dirname(__file__), "train_data.json")
+DT_MODEL_FILE = os.path.join(os.path.dirname(__file__), "model_decision_tree.pkl")
+ISO_MODEL_FILE = os.path.join(os.path.dirname(__file__), "model_iso_forest.pkl")
+
+FEATURES = ["temp", "humidity", "motion", "hour"]
+TARGETS = ["light1", "light2", "fan1", "fan2"]
+
+
+def _to_bool_int(value):
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float)):
+        return int(value != 0)
+    if isinstance(value, str):
+        normalized = value.strip().upper()
+        if normalized in {"ON", "TRUE", "1", "YES"}:
+            return 1
+        if normalized in {"OFF", "FALSE", "0", "NO"}:
+            return 0
+    return None
+
+
+def normalize_record(record):
+    temp = record.get("temp")
+    humidity = record.get("humidity")
+    motion = record.get("motion")
+    hour = record.get("hour")
+
+    if temp is None or humidity is None or motion is None or hour is None:
+        return None
+
+    try:
+        temp = float(temp)
+        humidity = float(humidity)
+        motion = int(_to_bool_int(motion))
+        hour = int(hour)
+    except (TypeError, ValueError):
+        return None
+
+    light1 = _to_bool_int(record.get("light1", record.get("light_on")))
+    light2 = _to_bool_int(record.get("light2", record.get("light_on")))
+    fan1 = _to_bool_int(record.get("fan1", record.get("fan_on")))
+    fan2 = _to_bool_int(record.get("fan2", record.get("fan_on")))
+
+    if None in {light1, light2, fan1, fan2}:
+        return None
+
+    return {
+        "temp": round(temp, 2),
+        "humidity": round(humidity, 2),
+        "motion": motion,
+        "hour": max(0, min(23, hour)),
+        "light1": light1,
+        "light2": light2,
+        "fan1": fan1,
+        "fan2": fan2,
+    }
+
+
 def load_data():
     if not os.path.exists(DATA_FILE):
-        print("[TRAIN] No data file found – generating synthetic data for demo.")
+        print("[TRAIN] No dataset found. Generating synthetic data.")
         return generate_synthetic_data()
 
-    with open(DATA_FILE) as f:
-        records = json.load(f)
-    df = pd.DataFrame(records)
-    return df
+    with open(DATA_FILE, "r", encoding="utf-8") as handle:
+        raw_records = json.load(handle)
 
-def generate_synthetic_data(n=1000):
-    """Create plausible synthetic home sensor data."""
+    normalized = [normalize_record(record) for record in raw_records]
+    normalized = [record for record in normalized if record is not None]
+
+    if not normalized:
+        print("[TRAIN] Dataset empty after normalization. Generating synthetic data.")
+        return generate_synthetic_data()
+
+    return pd.DataFrame(normalized)
+
+
+def generate_synthetic_data(samples=1200):
     np.random.seed(42)
-    hours    = np.random.randint(0, 24, n)
-    temp     = np.random.normal(25, 3, n).clip(15, 40)
-    humidity = np.random.normal(55, 10, n).clip(20, 90)
-    motion   = (np.random.rand(n) > 0.6).astype(int)
 
-    # Rule: light is ON in the evening (18-23) when motion is detected
-    light_on = (((hours >= 18) | (hours <= 6)) & (motion == 1)).astype(int)
-    # Add some noise
-    flip_idx = np.random.choice(n, int(n * 0.05), replace=False)
-    light_on[flip_idx] = 1 - light_on[flip_idx]
+    hours = np.random.randint(0, 24, samples)
+    temp = np.random.normal(27, 4, samples).clip(16, 40)
+    humidity = np.random.normal(58, 12, samples).clip(20, 90)
+    motion = (np.random.rand(samples) > 0.45).astype(int)
 
-    df = pd.DataFrame({
-        "hour":     hours,
-        "temp":     temp.round(1),
-        "humidity": humidity.round(1),
-        "motion":   motion,
-        "light_on": light_on,
-    })
+    is_night = ((hours >= 18) | (hours < 6)).astype(int)
+    hot_and_active = ((temp > 30) & (motion == 1)).astype(int)
+    lights_on = (is_night & (motion == 1)).astype(int)
+
+    light1 = lights_on.copy()
+    light2 = lights_on.copy()
+    fan1 = hot_and_active.copy()
+    fan2 = hot_and_active.copy()
+
+    # Add light noise so the tree sees non-perfect behaviour patterns.
+    noise_idx = np.random.choice(samples, int(samples * 0.06), replace=False)
+    for idx in noise_idx:
+        choice = np.random.randint(0, 4)
+        if choice == 0:
+            light1[idx] = 1 - light1[idx]
+        elif choice == 1:
+            light2[idx] = 1 - light2[idx]
+        elif choice == 2:
+            fan1[idx] = 1 - fan1[idx]
+        else:
+            fan2[idx] = 1 - fan2[idx]
+
+    df = pd.DataFrame(
+        {
+            "temp": temp.round(2),
+            "humidity": humidity.round(2),
+            "motion": motion,
+            "hour": hours,
+            "light1": light1,
+            "light2": light2,
+            "fan1": fan1,
+            "fan2": fan2,
+        }
+    )
     df.to_json(DATA_FILE, orient="records", indent=2)
-    print(f"[TRAIN] Synthetic dataset saved ({n} records) → {DATA_FILE}")
+    print(f"[TRAIN] Synthetic dataset saved ({samples} records) -> {DATA_FILE}")
     return df
 
-# ─── FEATURE COLUMNS ─────────────────────────────────────
-FEATURES = ["hour", "temp", "humidity", "motion"]
-TARGET   = "light_on"
 
-# ─── TRAIN DECISION TREE ─────────────────────────────────
 def train_decision_tree(df):
-    X = df[FEATURES]
-    y = df[TARGET]
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    x_train, x_test, y_train, y_test = train_test_split(
+        df[FEATURES],
+        df[TARGETS],
+        test_size=0.2,
+        random_state=42,
+    )
 
-    model = DecisionTreeClassifier(max_depth=6, random_state=42)
-    model.fit(X_train, y_train)
+    model = DecisionTreeClassifier(max_depth=8, random_state=42)
+    model.fit(x_train, y_train)
 
-    print("\n[DT] Classification Report:")
-    print(classification_report(y_test, model.predict(X_test)))
+    predictions = model.predict(x_test)
+    prediction_df = pd.DataFrame(predictions, columns=TARGETS)
 
-    with open(DT_MODEL_FILE, "wb") as f:
-        pickle.dump(model, f)
-    print(f"[DT] Model saved → {DT_MODEL_FILE}")
-    return model
+    print("\n[DT] Classification reports:")
+    for target in TARGETS:
+        print(f"\n[{target}]")
+        print(classification_report(y_test[target], prediction_df[target], zero_division=0))
 
-# ─── TRAIN ISOLATION FOREST ──────────────────────────────
+    with open(DT_MODEL_FILE, "wb") as handle:
+        pickle.dump(model, handle)
+    print(f"[DT] Model saved -> {DT_MODEL_FILE}")
+
+
 def train_isolation_forest(df):
-    # Train only on "normal" behavior (light_on correctly follows hour/motion)
-    normal_df = df[(df["hour"] >= 6) & (df["hour"] <= 23)]
-    X = normal_df[["temp", "humidity", "motion"]]
+    iso = IsolationForest(n_estimators=150, contamination=0.03, random_state=42)
+    iso.fit(df[FEATURES])
 
-    iso = IsolationForest(n_estimators=100, contamination=0.02, random_state=42)
-    iso.fit(X)
+    with open(ISO_MODEL_FILE, "wb") as handle:
+        pickle.dump(iso, handle)
+    print(f"[ISO] Model saved -> {ISO_MODEL_FILE}")
 
-    with open(ISO_MODEL_FILE, "wb") as f:
-        pickle.dump(iso, f)
-    print(f"[ISO] IsolationForest saved → {ISO_MODEL_FILE}")
-    return iso
 
-# ─── MAIN ────────────────────────────────────────────────
 if __name__ == "__main__":
-    df = load_data()
-    print(f"[TRAIN] Dataset shape: {df.shape}")
-    print(df.head(3))
+    dataset = load_data()
+    print(f"[TRAIN] Dataset shape: {dataset.shape}")
+    print(dataset.head(3))
 
-    train_decision_tree(df)
-    train_isolation_forest(df)
-    print("\n✅ Training complete.")
+    train_decision_tree(dataset)
+    train_isolation_forest(dataset)
+    print("\nTraining complete.")

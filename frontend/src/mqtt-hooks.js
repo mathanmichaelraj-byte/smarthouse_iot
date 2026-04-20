@@ -1,48 +1,43 @@
-/**
- * mqtt-hooks.js
- * Custom React hooks for MQTT over WebSockets.
- * Uses mqtt.js (npm install mqtt)
- */
-
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import mqtt from "mqtt";
 
-const BROKER_WS = import.meta.env.VITE_MQTT_WS || "ws://broker.emqx.io:8083/mqtt";
+const BROKER_WS = import.meta.env.VITE_MQTT_WS || "ws://broker.hivemq.com:8000/mqtt";
 
-// Singleton MQTT client shared across hooks
 let sharedClient = null;
-const subscribers = {};  // topic -> Set of callbacks
+const subscribers = {};
 
 function getClient() {
   if (!sharedClient || sharedClient.disconnected) {
     sharedClient = mqtt.connect(BROKER_WS, {
-      clientId: `react-dashboard-${Math.random().toString(16).slice(2)}`,
-      clean:    true,
+      clientId: `smart-home-dashboard-${Math.random().toString(16).slice(2)}`,
+      clean: true,
+      reconnectPeriod: 1000,
     });
-    sharedClient.on("connect",    () => console.log("[MQTT] Connected to broker"));
-    sharedClient.on("error",      (e) => console.error("[MQTT] Error:", e.message));
-    sharedClient.on("message",    (topic, payload) => {
-      const msg = payload.toString();
-      (subscribers[topic] || []).forEach((cb) => cb(msg, topic));
+
+    sharedClient.on("connect", () => console.log("[MQTT] Connected"));
+    sharedClient.on("reconnect", () => console.log("[MQTT] Reconnecting"));
+    sharedClient.on("error", (error) => console.error("[MQTT] Error:", error.message));
+    sharedClient.on("message", (topic, payload) => {
+      const handlers = subscribers[topic];
+      if (!handlers) return;
+
+      const message = payload.toString();
+      handlers.forEach((callback) => callback(message, topic));
     });
   }
+
   return sharedClient;
 }
 
-// ─── useMQTTSubscribe ────────────────────────────────────
-/**
- * Subscribe to an MQTT topic and receive messages.
- * @param {string}   topic
- * @param {function} onMessage  (msg: string, topic: string) => void
- */
 export function useMQTTSubscribe(topic, onMessage) {
-  const cbRef = useRef(onMessage);
-  cbRef.current = onMessage;
+  const callbackRef = useRef(onMessage);
+  callbackRef.current = onMessage;
 
   useEffect(() => {
-    if (!topic) return;
+    if (!topic) return undefined;
+
     const client = getClient();
-    const handler = (msg, t) => cbRef.current(msg, t);
+    const handler = (message, currentTopic) => callbackRef.current(message, currentTopic);
 
     if (!subscribers[topic]) subscribers[topic] = new Set();
     subscribers[topic].add(handler);
@@ -58,40 +53,14 @@ export function useMQTTSubscribe(topic, onMessage) {
   }, [topic]);
 }
 
-// ─── useMQTTPublish ──────────────────────────────────────
-/**
- * Returns a stable publish function.
- * @returns {function} publish(topic: string, message: string) => void
- */
 export function useMQTTPublish() {
-  return useCallback((topic, message) => {
-    getClient().publish(topic, message);
+  return useCallback((topic, message, options) => {
+    getClient().publish(topic, message, options);
   }, []);
 }
 
-// ─── useSensorData ───────────────────────────────────────
-/**
- * Convenience hook: returns latest sensor reading for a device.
- * @param {string} device  e.g. "home1"
- * @returns {{ temp, humidity, motion, light_on, fan_on } | null}
- */
-export function useSensorData(device = "home1") {
-  const [data, setData] = useState(null);
-  useMQTTSubscribe(`${device}/sensor`, (msg) => {
-    try { setData(JSON.parse(msg)); } catch {}
-  });
-  return data;
-}
-
-// ─── useDeviceAck ─────────────────────────────────────────
-/**
- * Tracks acknowledged device state (light, fan, etc.)
- * @param {string} device  e.g. "home1"
- * @param {string} type    e.g. "light" | "fan"
- * @returns {string}  "ON" | "OFF" | "unknown"
- */
-export function useDeviceAck(device, type) {
-  const [state, setState] = useState("unknown");
-  useMQTTSubscribe(`${device}/${type}/ack`, (msg) => setState(msg));
-  return state;
+export function useMQTTTopicState(topic, initialValue = null) {
+  const [value, setValue] = useState(initialValue);
+  useMQTTSubscribe(topic, (message) => setValue(message));
+  return value;
 }

@@ -1,47 +1,78 @@
 """
-predict.py
-Called by ml_integration.js with args: temp humidity motion hour
-Outputs JSON: { "light_on": true/false }
+Predict device states for the smart home.
+
+Args: temp humidity motion hour
+Output:
+{
+  "light1": bool,
+  "light2": bool,
+  "fan1": bool,
+  "fan2": bool,
+  "confidence": float
+}
 """
-import sys
+
 import json
-import pickle
 import os
+import pickle
+import sys
+
 
 MODEL_FILE = os.path.join(os.path.dirname(__file__), "model_decision_tree.pkl")
+TARGETS = ["light1", "light2", "fan1", "fan2"]
+
+
+def emit_null():
+    print(json.dumps(None))
+
 
 def main():
     if not os.path.exists(MODEL_FILE):
-        # Model not trained yet – return null
-        print(json.dumps(None))
+        emit_null()
         return
 
     args = sys.argv[1:]
     if len(args) < 4:
-        print(json.dumps(None))
+        emit_null()
         return
 
     try:
-        temp     = float(args[0])
+        temp = float(args[0])
         humidity = float(args[1])
-        motion   = int(args[2])
-        hour     = int(args[3])
+        motion = int(args[2])
+        hour = int(args[3])
     except ValueError:
-        print(json.dumps(None))
+        emit_null()
         return
 
-    with open(MODEL_FILE, "rb") as f:
-        model = pickle.load(f)
+    try:
+        with open(MODEL_FILE, "rb") as handle:
+            model = pickle.load(handle)
+    except Exception:
+        emit_null()
+        return
 
-    X = [[hour, temp, humidity, motion]]
-    prediction = model.predict(X)[0]
-    prob = model.predict_proba(X)[0].tolist()
+    features = [[temp, humidity, motion, hour]]
+    predictions = model.predict(features)[0]
+
+    confidence = 0.0
+    try:
+        probabilities = model.predict_proba(features)
+        if isinstance(probabilities, list):
+            per_output_confidences = [max(map(float, prob[0])) for prob in probabilities]
+        else:
+            per_output_confidences = [max(map(float, probabilities[0]))]
+        confidence = min(per_output_confidences) if per_output_confidences else 0.0
+    except Exception:
+        confidence = 0.0
 
     result = {
-        "light_on":    bool(prediction),
-        "confidence":  round(max(prob), 3),
+        target: bool(predictions[index])
+        for index, target in enumerate(TARGETS)
     }
+    result["confidence"] = round(confidence, 3)
     print(json.dumps(result))
+
 
 if __name__ == "__main__":
     main()
