@@ -35,7 +35,7 @@ DATA_FILE = os.path.join(os.path.dirname(__file__), "train_data.json")
 DT_MODEL_FILE = os.path.join(os.path.dirname(__file__), "model_decision_tree.pkl")
 ISO_MODEL_FILE = os.path.join(os.path.dirname(__file__), "model_iso_forest.pkl")
 
-FEATURES = ["temp", "humidity", "motion", "hour"]
+FEATURES = ["temp", "humidity", "motion", "ldr"]
 TARGETS = ["light1", "light2", "fan1", "fan2"]
 
 
@@ -57,23 +57,24 @@ def normalize_record(record):
     temp = record.get("temp")
     humidity = record.get("humidity")
     motion = record.get("motion")
-    hour = record.get("hour")
+    ldr = record.get("ldr")
+    hour = record.get("hour")  # keep for generation
 
-    if temp is None or humidity is None or motion is None or hour is None:
+    if temp is None or humidity is None or motion is None or ldr is None:
         return None
 
     try:
         temp = float(temp)
         humidity = float(humidity)
         motion = int(_to_bool_int(motion))
-        hour = int(hour)
+        ldr = int(ldr)
     except (TypeError, ValueError):
         return None
 
-    light1 = _to_bool_int(record.get("light1", record.get("light_on")))
-    light2 = _to_bool_int(record.get("light2", record.get("light_on")))
-    fan1 = _to_bool_int(record.get("fan1", record.get("fan_on")))
-    fan2 = _to_bool_int(record.get("fan2", record.get("fan_on")))
+    light1 = _to_bool_int(record.get("light1", record.get("relay_light1")))
+    light2 = _to_bool_int(record.get("light2", record.get("relay_light2")))
+    fan1 = _to_bool_int(record.get("fan1", record.get("relay_fan1")))
+    fan2 = _to_bool_int(record.get("fan2", record.get("relay_fan2")))
 
     if None in {light1, light2, fan1, fan2}:
         return None
@@ -82,7 +83,8 @@ def normalize_record(record):
         "temp": round(temp, 2),
         "humidity": round(humidity, 2),
         "motion": motion,
-        "hour": max(0, min(23, hour)),
+        "ldr": ldr,
+        "hour": max(0, min(23, int(hour))) if hour is not None else 12,
         "light1": light1,
         "light2": light2,
         "fan1": fan1,
@@ -115,8 +117,9 @@ def generate_synthetic_data(samples=1200):
     temp = np.random.normal(27, 4, samples).clip(16, 40)
     humidity = np.random.normal(58, 12, samples).clip(20, 90)
     motion = (np.random.rand(samples) > 0.45).astype(int)
+    ldr = np.where(hours >= 18, np.random.normal(3500, 500, samples), np.random.normal(500, 200, samples)).clip(0, 4095).astype(int)
 
-    is_night = ((hours >= 18) | (hours < 6)).astype(int)
+    is_night = ldr > 3000
     hot_and_active = ((temp > 30) & (motion == 1)).astype(int)
     lights_on = (is_night & (motion == 1)).astype(int)
 
@@ -143,6 +146,7 @@ def generate_synthetic_data(samples=1200):
             "temp": temp.round(2),
             "humidity": humidity.round(2),
             "motion": motion,
+            "ldr": ldr,
             "hour": hours,
             "light1": light1,
             "light2": light2,

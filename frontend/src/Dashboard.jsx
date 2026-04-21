@@ -16,6 +16,9 @@ const API = import.meta.env.VITE_API || "http://localhost:3001";
 const DEVICE = "home1";
 const HISTORY_LIMIT = 60;
 
+console.log("[Dashboard] API endpoint:", API);
+console.log("[Dashboard] Device ID:", DEVICE);
+
 const DEVICE_CONFIG = [
   { key: "light1", label: "Light 1", accent: "#f59e0b" },
   { key: "light2", label: "Light 2", accent: "#f97316" },
@@ -73,14 +76,52 @@ function DeviceCard({ label, target, accent, isOn, onChange }) {
   );
 }
 
+function SystemControlCard({ label, target, isOn, onChange }) {
+  return (
+    <div style={styles.deviceCard}>
+      <div style={styles.deviceHeader}>
+        <span style={styles.deviceLabel}>{label}</span>
+        <span
+          style={{
+            ...styles.deviceBadge,
+            background: isOn ? "#22c55e22" : "#334155",
+            color: isOn ? "#22c55e" : "#94a3b8",
+            borderColor: isOn ? "#22c55e66" : "#475569",
+          }}
+        >
+          {isOn ? "ON" : "OFF"}
+        </span>
+      </div>
+
+      <div style={styles.buttonRow}>
+        <button style={{ ...styles.button, ...styles.onButton }} onClick={() => onChange(target, true)}>
+          Enable
+        </button>
+        <button style={{ ...styles.button, ...styles.offButton }} onClick={() => onChange(target, false)}>
+          Disable
+        </button>
+      </div>
+
+      <div style={styles.deviceHint}>System control</div>
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const publish = useMQTTPublish();
   const [sensor, setSensor] = useState({
     temp: null,
     humidity: null,
+    pir1: null,
+    pir2: null,
     motion: null,
+    ldr: null,
   });
   const [deviceStates, setDeviceStates] = useState(EMPTY_DEVICE_STATE);
+  const [systemStates, setSystemStates] = useState({
+    ml_mode: true,
+    buzzer_mute: false,
+  });
   const [history, setHistory] = useState([]);
   const [alerts, setAlerts] = useState([]);
 
@@ -89,24 +130,39 @@ export default function Dashboard() {
 
     async function loadInitialData() {
       try {
+        console.log("[Dashboard] Fetching initial data from", API);
         const [devicesResponse, readingsResponse] = await Promise.all([
           fetch(`${API}/api/devices`),
           fetch(`${API}/api/readings?device=${DEVICE}&limit=${HISTORY_LIMIT}`),
         ]);
+
+        if (!devicesResponse.ok) {
+          console.error("[Dashboard] Devices request failed:", devicesResponse.status, devicesResponse.statusText);
+        }
+        if (!readingsResponse.ok) {
+          console.error("[Dashboard] Readings request failed:", readingsResponse.status, readingsResponse.statusText);
+        }
 
         const [devices, readings] = await Promise.all([
           devicesResponse.json(),
           readingsResponse.json(),
         ]);
 
+        console.log("[Dashboard] Loaded devices:", devices);
+        console.log("[Dashboard] Loaded readings:", readings);
+
         if (cancelled) return;
 
         const currentDevice = Array.isArray(devices) ? devices.find((item) => item.device === DEVICE) : null;
         if (currentDevice) {
+          console.log("[Dashboard] Found current device in devices list");
           setSensor({
             temp: currentDevice.temp ?? null,
             humidity: currentDevice.humidity ?? null,
+            pir1: currentDevice.pir1 ?? null,
+            pir2: currentDevice.pir2 ?? null,
             motion: currentDevice.motion ?? null,
+            ldr: currentDevice.ldr ?? null,
           });
           setDeviceStates({
             light1: Boolean(currentDevice.light1),
@@ -114,9 +170,14 @@ export default function Dashboard() {
             fan1: Boolean(currentDevice.fan1),
             fan2: Boolean(currentDevice.fan2),
           });
+          setSystemStates({
+            ml_mode: Boolean(currentDevice.ml_enabled ?? true),
+            buzzer_mute: Boolean(currentDevice.buzzer_muted ?? false),
+          });
         }
 
         if (Array.isArray(readings)) {
+          console.log("[Dashboard] Processing", readings.length, "readings");
           setHistory(
             readings.map((reading) => ({
               time: new Date(reading.timestamp).toLocaleTimeString([], {
@@ -131,21 +192,30 @@ export default function Dashboard() {
 
           const latest = readings[readings.length - 1];
           if (!currentDevice && latest) {
+            console.log("[Dashboard] Using latest reading as fallback");
             setSensor({
               temp: latest.temp ?? null,
               humidity: latest.humidity ?? null,
+              pir1: latest.pir1 ?? null,
+              pir2: latest.pir2 ?? null,
               motion: latest.motion ?? null,
+              ldr: latest.ldr ?? null,
             });
             setDeviceStates({
-              light1: Boolean(latest.light1),
-              light2: Boolean(latest.light2),
-              fan1: Boolean(latest.fan1),
-              fan2: Boolean(latest.fan2),
+              light1: Boolean(latest.relay_light1),
+              light2: Boolean(latest.relay_light2),
+              fan1: Boolean(latest.relay_fan1),
+              fan2: Boolean(latest.relay_fan2),
+            });
+            setSystemStates({
+              ml_mode: Boolean(latest.ml_enabled ?? true),
+              buzzer_mute: Boolean(latest.buzzer_muted ?? false),
             });
           }
         }
       } catch (error) {
         console.error("[Dashboard] Initial load failed:", error.message);
+        console.error("[Dashboard] Check if backend is running at", API);
       }
     }
 
@@ -162,14 +232,22 @@ export default function Dashboard() {
       setSensor({
         temp: parsed.temp ?? null,
         humidity: parsed.humidity ?? null,
+        pir1: parsed.pir1 ?? null,
+        pir2: parsed.pir2 ?? null,
         motion: parsed.motion ?? null,
+        ldr: parsed.ldr ?? null,
       });
       setDeviceStates((previous) => ({
         ...previous,
-        light1: typeof parsed.light1 === "boolean" ? parsed.light1 : previous.light1,
-        light2: typeof parsed.light2 === "boolean" ? parsed.light2 : previous.light2,
-        fan1: typeof parsed.fan1 === "boolean" ? parsed.fan1 : previous.fan1,
-        fan2: typeof parsed.fan2 === "boolean" ? parsed.fan2 : previous.fan2,
+        light1: typeof parsed.relay_light1 === "boolean" ? parsed.relay_light1 : previous.light1,
+        light2: typeof parsed.relay_light2 === "boolean" ? parsed.relay_light2 : previous.light2,
+        fan1: typeof parsed.relay_fan1 === "boolean" ? parsed.relay_fan1 : previous.fan1,
+        fan2: typeof parsed.relay_fan2 === "boolean" ? parsed.relay_fan2 : previous.fan2,
+      }));
+      setSystemStates((previous) => ({
+        ...previous,
+        ml_mode: typeof parsed.ml_enabled === "boolean" ? parsed.ml_enabled : previous.ml_mode,
+        buzzer_mute: typeof parsed.buzzer_muted === "boolean" ? parsed.buzzer_muted : previous.buzzer_mute,
       }));
       setHistory((previous) => [
         ...previous.slice(-(HISTORY_LIMIT - 1)),
@@ -214,12 +292,30 @@ export default function Dashboard() {
   useMQTTSubscribe(`${DEVICE}/fan2`, (message) => {
     setDeviceStates((previous) => ({ ...previous, fan2: message === "ON" }));
   });
+  useMQTTSubscribe(`${DEVICE}/ml_mode`, (message) => {
+    setSystemStates((previous) => ({ ...previous, ml_mode: message === "ON" }));
+  });
+  useMQTTSubscribe(`${DEVICE}/buzzer_mute`, (message) => {
+    setSystemStates((previous) => ({ ...previous, buzzer_mute: message === "ON" }));
+  });
 
-  const latestAlert = alerts[0] || null;
   const motionLabel = sensor.motion === null ? "Unknown" : sensor.motion ? "Detected" : "Clear";
+  const pir1Label = sensor.pir1 === null ? "Unknown" : sensor.pir1 ? "Detected" : "Clear";
+  const pir2Label = sensor.pir2 === null ? "Unknown" : sensor.pir2 ? "Detected" : "Clear";
 
   function handleManualChange(target, nextState) {
-    publish(`${DEVICE}/${target}_manual`, nextState ? "ON" : "OFF");
+    const topic = `${DEVICE}/${target}_manual`;
+    const payload = nextState ? "ON" : "OFF";
+    console.log("[Dashboard] Button clicked:", { target, nextState, topic, payload });
+    publish(topic, payload);
+  }
+
+  function handleSystemChange(target, nextState) {
+    setSystemStates((previous) => ({ ...previous, [target]: nextState }));
+    const topic = `${DEVICE}/${target}`;
+    const payload = nextState ? "ON" : "OFF";
+    console.log("[Dashboard] System change:", { target, nextState, topic, payload });
+    publish(topic, payload, { retain: true });
   }
 
   return (
@@ -234,12 +330,12 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {latestAlert ? (
+      {alerts.length > 0 ? (
         <div style={styles.alertBanner}>
           <div style={styles.alertLabel}>ALERT</div>
           <div style={styles.alertContent}>
-            <strong>{latestAlert.message}</strong>
-            <span style={styles.alertMeta}>Received at {latestAlert.time}</span>
+            <strong>{alerts[0].message}</strong>
+            <span style={styles.alertMeta}>Received at {alerts[0].time}</span>
           </div>
         </div>
       ) : null}
@@ -247,7 +343,10 @@ export default function Dashboard() {
       <section style={styles.sensorGrid}>
         <SensorCard label="Temperature" value={sensor.temp} unit="°C" accent="#f97316" />
         <SensorCard label="Humidity" value={sensor.humidity} unit="%" accent="#38bdf8" />
+        <SensorCard label="PIR 1" value={pir1Label} unit="" accent="#22c55e" />
+        <SensorCard label="PIR 2" value={pir2Label} unit="" accent="#22c55e" />
         <SensorCard label="Motion" value={motionLabel} unit="" accent="#22c55e" />
+        <SensorCard label="LDR" value={sensor.ldr} unit="" accent="#f59e0b" />
       </section>
 
       <section style={styles.controlsGrid}>
@@ -261,6 +360,11 @@ export default function Dashboard() {
             onChange={handleManualChange}
           />
         ))}
+      </section>
+
+      <section style={styles.systemControls}>
+        <SystemControlCard label="ML Mode" target="ml_mode" isOn={systemStates.ml_mode} onChange={handleSystemChange} />
+        <SystemControlCard label="Buzzer Mute" target="buzzer_mute" isOn={systemStates.buzzer_mute} onChange={handleSystemChange} />
       </section>
 
       <section style={styles.chartCard}>
@@ -376,6 +480,12 @@ const styles = {
     marginBottom: 20,
   },
   controlsGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+    gap: 16,
+    marginBottom: 20,
+  },
+  systemControls: {
     display: "grid",
     gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
     gap: 16,

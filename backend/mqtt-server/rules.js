@@ -17,9 +17,10 @@ function isNightHour(hour) {
   return hour >= 18 || hour < 6;
 }
 
-function buildFallbackDecision({ temp, motion, hour }) {
+function buildFallbackDecision({ temp, motion, ldr }) {
+  const isNight = ldr > 3000; // assuming high ldr means night
   const fansOn = temp > 30 && motion === true;
-  const lightsOn = isNightHour(hour) && motion === true;
+  const lightsOn = isNight && motion === true;
 
   return {
     light1: lightsOn,

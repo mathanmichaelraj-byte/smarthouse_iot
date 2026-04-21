@@ -35,12 +35,12 @@ function runJsonScript(script, args) {
   });
 }
 
-function toFeatureArgs({ temp, humidity, motion, hour }) {
+function toFeatureArgs({ temp, humidity, motion, ldr }) {
   return [
     temp ?? 25,
     humidity ?? 50,
     motion ? 1 : 0,
-    hour ?? new Date().getHours(),
+    ldr ?? 500,
   ];
 }
 

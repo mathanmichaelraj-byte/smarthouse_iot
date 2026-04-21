@@ -2,10 +2,11 @@
 #include <PubSubClient.h>
 #include <DHT.h>
 #include <ArduinoJson.h>
+#include <ESP32Servo.h>
 
 // ---------------- WIFI ----------------
-const char* ssid = "realme X7 5G";
-const char* password = "kapne7u4";
+const char* ssid = "mahii";
+const char* password = "hidamayulu";
 
 // ---------------- MQTT ----------------
 const char* mqttServer = "broker.hivemq.com";
@@ -15,35 +16,64 @@ const char* deviceId = "home1";
 // ---------------- PINS ----------------
 #define DHTPIN 4
 #define DHTTYPE DHT11
-#define PIR_PIN 27
-#define BUZZER_PIN 23
+#define PIR1_PIN 5
+#define PIR2_PIN 13
+#define LDR_PIN 34
+#define RELAY_LIGHT1_PIN 18
+#define RELAY_LIGHT2_PIN 19
+#define RELAY_FAN1_PIN 22
+#define RELAY_FAN2_PIN 23
+#define BUZZER_PIN 21
+#define SERVO_PIN 25
+#define SW_LIGHT1_PIN 32
+#define SW_LIGHT2_PIN 33
+#define SW_FAN1_PIN 26
+#define SW_FAN2_PIN 27
+#define BTN_ML_TOGGLE_PIN 14
+#define BTN_BUZZER_MUTE_PIN 16
 
 const int DEVICE_COUNT = 4;
 
 // Devices
 const char* DEVICE_NAMES[DEVICE_COUNT] = { "light1", "light2", "fan1", "fan2" };
 
-// Relay pins (ACTIVE LOW)
-const int RELAY_PINS[DEVICE_COUNT] = { 13, 12, 25, 26 };
+// Relay pins
+const int RELAY_PINS[DEVICE_COUNT] = { RELAY_LIGHT1_PIN, RELAY_LIGHT2_PIN, RELAY_FAN1_PIN, RELAY_FAN2_PIN };
 
 // Switch pins (INPUT_PULLUP)
-const int SWITCH_PINS[DEVICE_COUNT] = { 16, 17, 18, 19 };
+const int SWITCH_PINS[DEVICE_COUNT] = { SW_LIGHT1_PIN, SW_LIGHT2_PIN, SW_FAN1_PIN, SW_FAN2_PIN };
+
+// Push button pins (INPUT_PULLUP)
+#define BTN_ML_TOGGLE BTN_ML_TOGGLE_PIN
+#define BTN_BUZZER_MUTE BTN_BUZZER_MUTE_PIN
 
 // ---------------- TIMING ----------------
 const unsigned long SENSOR_INTERVAL = 5000;
 const unsigned long SWITCH_DEBOUNCE_MS = 80;
+const unsigned long BUTTON_DEBOUNCE_MS = 200;
 
 // ---------------- OBJECTS ----------------
 DHT dht(DHTPIN, DHTTYPE);
 WiFiClient espClient;
 PubSubClient client(espClient);
+Servo doorServo;
 
 // ---------------- STATES ----------------
 bool relayState[DEVICE_COUNT] = { false, false, false, false };
+bool mlEnabled = true;
+bool buzzerMuted = false;
 
 int lastSwitchReading[DEVICE_COUNT];
 int stableSwitchReading[DEVICE_COUNT];
 unsigned long lastSwitchDebounce[DEVICE_COUNT];
+
+int lastBtnMlReading = HIGH;
+int stableBtnMlReading = HIGH;
+unsigned long lastBtnMlDebounce = 0;
+
+int lastBtnBuzzerReading = HIGH;
+int stableBtnBuzzerReading = HIGH;
+unsigned long lastBtnBuzzerDebounce = 0;
 
 unsigned long lastSensorPublish = 0;
 
@@ -56,10 +86,19 @@ String manualTopicFor(int i) {
   return controlTopicFor(i) + "_manual";
 }
 
+String topicFor(const char* suffix) {
+  return String(deviceId) + "/" + suffix;
+}
+
+void publishSystemTopic(const char* suffix, bool state) {
+  client.publish(topicFor(suffix).c_str(), state ? "ON" : "OFF", true);
+}
+
 // ---------------- RELAY CONTROL ----------------
 void setRelay(int i, bool state) {
   relayState[i] = state;
-  digitalWrite(RELAY_PINS[i], state ? LOW : HIGH); // ACTIVE LOW
+  // Relay modules are typically active-LOW: LOW=ON, HIGH=OFF
+  digitalWrite(RELAY_PINS[i], state ? LOW : HIGH);
 }
 
 // ---------------- WIFI ----------------
@@ -88,8 +127,32 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   Serial.println("MQTT [" + t + "] -> " + msg);
 
   // Buzzer control
-  if (t == String(deviceId) + "/buzzer") {
+  if (t == topicFor("buzzer")) {
     digitalWrite(BUZZER_PIN, msg == "ON" ? HIGH : LOW);
+    return;
+  }
+
+  // ML mode
+  if (t == topicFor("ml_mode")) {
+    mlEnabled = (msg == "ON");
+    return;
+  }
+
+  if (t == topicFor("buzzer_mute")) {
+    buzzerMuted = (msg == "ON");
+    if (buzzerMuted) {
+      digitalWrite(BUZZER_PIN, LOW);
+    }
+    return;
+  }
+
+  // Door servo
+  if (t == topicFor("door")) {
+    if (msg == "OPEN") {
+      doorServo.write(90); // open position
+    } else if (msg == "CLOSE") {
+      doorServo.write(0); // close position
+    }
     return;
   }
 
@@ -116,7 +179,10 @@ void reconnectMQTT() {
         client.subscribe(controlTopicFor(i).c_str());
       }
 
-      client.subscribe((String(deviceId) + "/buzzer").c_str());
+      client.subscribe(topicFor("buzzer").c_str());
+      client.subscribe(topicFor("ml_mode").c_str());
+      client.subscribe(topicFor("buzzer_mute").c_str());
+      client.subscribe(topicFor("door").c_str());
 
     } else {
       Serial.print("Failed rc=");
@@ -136,26 +202,33 @@ void publishSensorData() {
     return;
   }
 
-  // PIR filter
-  static int motionCount = 0;
-  if (digitalRead(PIR_PIN)) motionCount++;
-  else motionCount = 0;
-
-  bool motion = motionCount > 2;
+  bool pir1 = digitalRead(PIR1_PIN);
+  bool pir2 = digitalRead(PIR2_PIN);
+  int ldr = analogRead(LDR_PIN);
+  bool motion = pir1 || pir2;
 
   StaticJsonDocument<512> doc;
 
   doc["device"] = deviceId;
   doc["temp"] = temp;
   doc["humidity"] = hum;
+  doc["pir1"] = pir1;
+  doc["pir2"] = pir2;
   doc["motion"] = motion;
+  doc["ldr"] = ldr;
 
-  doc["light1"] = relayState[0];
-  doc["light2"] = relayState[1];
-  doc["fan1"] = relayState[2];
-  doc["fan2"] = relayState[3];
+  doc["sw_light1"] = digitalRead(SW_LIGHT1_PIN) == LOW;
+  doc["sw_light2"] = digitalRead(SW_LIGHT2_PIN) == LOW;
+  doc["sw_fan1"] = digitalRead(SW_FAN1_PIN) == LOW;
+  doc["sw_fan2"] = digitalRead(SW_FAN2_PIN) == LOW;
 
-  doc["time"] = millis() / 1000;
+  doc["relay_light1"] = relayState[0];
+  doc["relay_light2"] = relayState[1];
+  doc["relay_fan1"] = relayState[2];
+  doc["relay_fan2"] = relayState[3];
+
+  doc["ml_enabled"] = mlEnabled;
+  doc["buzzer_muted"] = buzzerMuted;
 
   char payload[512];
   serializeJson(doc, payload);
@@ -169,7 +242,48 @@ void publishSensorData() {
 
 // ---------------- MANUAL ACTION ----------------
 void publishManual(int i, bool state) {
-  client.publish(manualTopicFor(i).c_str(), state ? "ON" : "OFF", true);
+  client.publish(manualTopicFor(i).c_str(), state ? "ON" : "OFF");
+  setRelay(i, state);  // Update relay when manual switch changes
+}
+
+// ---------------- BUTTON HANDLING ----------------
+void handleButtons() {
+  // ML toggle button
+  int reading = digitalRead(BTN_ML_TOGGLE);
+  if (reading != lastBtnMlReading) {
+    lastBtnMlReading = reading;
+    lastBtnMlDebounce = millis();
+  }
+  if (millis() - lastBtnMlDebounce > BUTTON_DEBOUNCE_MS) {
+    if (reading != stableBtnMlReading) {
+      stableBtnMlReading = reading;
+      if (reading == LOW) { // button pressed
+        mlEnabled = !mlEnabled;
+        publishSystemTopic("ml_mode", mlEnabled);
+        Serial.println("ML mode toggled: " + String(mlEnabled ? "ON" : "OFF"));
+      }
+    }
+  }
+
+  // Buzzer mute button
+  reading = digitalRead(BTN_BUZZER_MUTE);
+  if (reading != lastBtnBuzzerReading) {
+    lastBtnBuzzerReading = reading;
+    lastBtnBuzzerDebounce = millis();
+  }
+  if (millis() - lastBtnBuzzerDebounce > BUTTON_DEBOUNCE_MS) {
+    if (reading != stableBtnBuzzerReading) {
+      stableBtnBuzzerReading = reading;
+      if (reading == LOW) { // button pressed
+        buzzerMuted = !buzzerMuted;
+        publishSystemTopic("buzzer_mute", buzzerMuted);
+        if (buzzerMuted) {
+          digitalWrite(BUZZER_PIN, LOW);
+        }
+        Serial.println("Buzzer mute toggled: " + String(buzzerMuted ? "ON" : "OFF"));
+      }
+    }
+  }
 }
 
 // ---------------- SWITCH HANDLING ----------------
@@ -184,17 +298,14 @@ void handleSwitches() {
 
     if (millis() - lastSwitchDebounce[i] < SWITCH_DEBOUNCE_MS) continue;
 
+    // Only publish when the switch position actually CHANGES
     if (reading != stableSwitchReading[i]) {
       stableSwitchReading[i] = reading;
 
-      bool newState = (reading == LOW);
+      bool newState = (reading == LOW);  // LOW = pressed/ON, HIGH = released/OFF
+      publishManual(i, newState);
 
-      if (relayState[i] != newState) {
-        setRelay(i, newState);
-        publishManual(i, newState);
-
-        Serial.println("Manual toggle: " + String(DEVICE_NAMES[i]));
-      }
+      Serial.println("Manual toggle: " + String(DEVICE_NAMES[i]) + " -> " + String(newState ? "ON" : "OFF"));
     }
   }
 }
@@ -203,21 +314,44 @@ void handleSwitches() {
 void setup() {
   Serial.begin(115200);
 
-  pinMode(PIR_PIN, INPUT);
+  // Sensor pins
+  pinMode(PIR1_PIN, INPUT);
+  pinMode(PIR2_PIN, INPUT);
+  pinMode(LDR_PIN, INPUT);
+
+  // Output pins
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
 
+  // Servo
+  doorServo.attach(SERVO_PIN);
+  doorServo.write(0); // closed
+
+  // Relays
   for (int i = 0; i < DEVICE_COUNT; i++) {
     pinMode(RELAY_PINS[i], OUTPUT);
-    pinMode(SWITCH_PINS[i], INPUT_PULLUP);
-
     setRelay(i, false);
+  }
 
+  // Switches
+  for (int i = 0; i < DEVICE_COUNT; i++) {
+    pinMode(SWITCH_PINS[i], INPUT_PULLUP);
     int r = digitalRead(SWITCH_PINS[i]);
     lastSwitchReading[i] = r;
     stableSwitchReading[i] = r;
     lastSwitchDebounce[i] = 0;
   }
+
+  // Buttons
+  pinMode(BTN_ML_TOGGLE, INPUT_PULLUP);
+  lastBtnMlReading = digitalRead(BTN_ML_TOGGLE);
+  stableBtnMlReading = lastBtnMlReading;
+  lastBtnMlDebounce = 0;
+
+  pinMode(BTN_BUZZER_MUTE, INPUT_PULLUP);
+  lastBtnBuzzerReading = digitalRead(BTN_BUZZER_MUTE);
+  stableBtnBuzzerReading = lastBtnBuzzerReading;
+  lastBtnBuzzerDebounce = 0;
 
   dht.begin();
   connectWiFi();
@@ -243,6 +377,9 @@ void loop() {
 
   // switches
   handleSwitches();
+
+  // buttons
+  handleButtons();
 
   // sensor publish
   if (millis() - lastSensorPublish > SENSOR_INTERVAL) {

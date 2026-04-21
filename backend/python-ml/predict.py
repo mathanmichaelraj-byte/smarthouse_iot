@@ -1,7 +1,7 @@
 """
 Predict device states for the smart home.
 
-Args: temp humidity motion hour
+Args: temp humidity motion ldr
 Output:
 {
   "light1": bool,
@@ -40,7 +40,7 @@ def main():
         temp = float(args[0])
         humidity = float(args[1])
         motion = int(args[2])
-        hour = int(args[3])
+        ldr = int(args[3])
     except ValueError:
         emit_null()
         return
@@ -52,7 +52,7 @@ def main():
         emit_null()
         return
 
-    features = [[temp, humidity, motion, hour]]
+    features = [[temp, humidity, motion, ldr]]
     predictions = model.predict(features)[0]
 
     confidence = 0.0

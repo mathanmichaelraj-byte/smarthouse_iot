@@ -299,6 +299,51 @@ Implemented in the repo:
 - both firmware paths
 - ML script contract upgrade
 
+## Control Flow & Troubleshooting
+
+### How Dashboard & Manual Switch Controls Work
+
+**Dashboard Control Flow:**
+1. User clicks button on dashboard → Frontend publishes to `home1/light1_manual` with `ON`/`OFF`
+2. Backend receives on `home1/light1_manual` topic → Publishes control to `home1/light1` 
+3. Firmware receives on `home1/light1` → Sets relay to requested state
+4. Dashboard subscribes to `home1/light1` → Updates UI to reflect actual relay state
+
+**Manual Switch Control Flow:**
+1. User flips physical switch → Firmware detects change (debounced)
+2. Firmware publishes to `home1/light1_manual` with new state
+3. Backend receives on `home1/light1_manual` → Publishes control to `home1/light1`
+4. Firmware receives on `home1/light1` → Updates relay (already updated, so this confirms state)
+5. Dashboard subscribes to `home1/light1` → Shows updated state
+
+### If Controls Don't Work Properly
+
+**Issue: Dashboard turns OFF but device turns ON (or vice versa)**
+
+This usually means the switch input logic is inverted. The firmware treats INPUT_PULLUP switches as:
+- `LOW` (pressed/closed) = `ON` state
+- `HIGH` (released/open) = `OFF` state
+
+If your physical switches are wired oppositely, change [firmware/ESP32/main/main.ino](firmware/ESP32/main/main.ino) line ~285:
+```cpp
+bool newState = (reading == LOW);  // Change to: (reading == HIGH) if inverted
+```
+
+**Issue: Relay doesn't respond to controls**
+
+1. Check MQTT connection: Backend logs should show "MQTT connected"
+2. Verify relay pins match firmware defines (GPIO 18, 19, 22, 23 by default)
+3. Check if relay module is active-HIGH or active-LOW in hardware
+4. Verify MongoDB is running and storing readings
+
+**Issue: Dashboard and manual switch conflict**
+
+This has been fixed in the latest firmware. The firmware now:
+- Only publishes manual actions when the physical switch actually **changes**
+- Does not force the relay to match the switch position
+- Lets the MQTT backend coordinate between dashboard and physical controls
+
+
 Still required on a fresh machine:
 - install Python ML dependencies from `requirements.txt`
 - run `npm install` where needed to refresh lockfiles after dependency cleanup

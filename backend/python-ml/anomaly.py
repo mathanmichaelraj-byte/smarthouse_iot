@@ -1,7 +1,7 @@
 """
 Anomaly detection for the smart home sensor stream.
 
-Args: temp humidity motion hour
+Args: temp humidity motion ldr
 Output: { "anomaly": bool, "score": float }
 """
 
@@ -32,7 +32,7 @@ def main():
         temp = float(args[0])
         humidity = float(args[1])
         motion = int(args[2])
-        hour = int(args[3])
+        ldr = int(args[3])
     except ValueError:
         emit_default()
         return
@@ -44,7 +44,7 @@ def main():
         emit_default()
         return
 
-    features = [[temp, humidity, motion, hour]]
+    features = [[temp, humidity, motion, ldr]]
     label = model.predict(features)[0]
     score = model.score_samples(features)[0]
 

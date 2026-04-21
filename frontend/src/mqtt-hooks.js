@@ -5,23 +5,36 @@ const BROKER_WS = import.meta.env.VITE_MQTT_WS || "ws://broker.hivemq.com:8000/m
 
 let sharedClient = null;
 const subscribers = {};
+let isConnected = false;
 
 function getClient() {
   if (!sharedClient || sharedClient.disconnected) {
+    console.log("[MQTT] Creating new client, connecting to:", BROKER_WS);
     sharedClient = mqtt.connect(BROKER_WS, {
       clientId: `smart-home-dashboard-${Math.random().toString(16).slice(2)}`,
       clean: true,
       reconnectPeriod: 1000,
     });
 
-    sharedClient.on("connect", () => console.log("[MQTT] Connected"));
+    sharedClient.on("connect", () => {
+      isConnected = true;
+      console.log("[MQTT] Connected");
+    });
     sharedClient.on("reconnect", () => console.log("[MQTT] Reconnecting"));
-    sharedClient.on("error", (error) => console.error("[MQTT] Error:", error.message));
+    sharedClient.on("error", (error) => {
+      isConnected = false;
+      console.error("[MQTT] Error:", error.message);
+    });
+    sharedClient.on("offline", () => {
+      isConnected = false;
+      console.log("[MQTT] Offline");
+    });
     sharedClient.on("message", (topic, payload) => {
       const handlers = subscribers[topic];
       if (!handlers) return;
 
       const message = payload.toString();
+      console.log(`[MQTT] Message on ${topic}:`, message);
       handlers.forEach((callback) => callback(message, topic));
     });
   }
@@ -41,12 +54,32 @@ export function useMQTTSubscribe(topic, onMessage) {
 
     if (!subscribers[topic]) subscribers[topic] = new Set();
     subscribers[topic].add(handler);
-    client.subscribe(topic);
+    
+    if (isConnected) {
+      client.subscribe(topic, (error) => {
+        if (error) {
+          console.error(`[MQTT] Subscribe error for ${topic}:`, error.message);
+        } else {
+          console.log(`[MQTT] Subscribed to ${topic}`);
+        }
+      });
+    } else {
+      console.log(`[MQTT] Queueing subscription for ${topic} (not connected yet)`);
+      client.subscribe(topic, (error) => {
+        if (error) {
+          console.error(`[MQTT] Subscribe error for ${topic}:`, error.message);
+        } else {
+          console.log(`[MQTT] Subscribed to ${topic}`);
+        }
+      });
+    }
 
     return () => {
       subscribers[topic]?.delete(handler);
       if (subscribers[topic]?.size === 0) {
-        client.unsubscribe(topic);
+        if (isConnected) {
+          client.unsubscribe(topic);
+        }
         delete subscribers[topic];
       }
     };
@@ -55,7 +88,18 @@ export function useMQTTSubscribe(topic, onMessage) {
 
 export function useMQTTPublish() {
   return useCallback((topic, message, options) => {
-    getClient().publish(topic, message, options);
+    const client = getClient();
+    if (!isConnected) {
+      console.warn(`[MQTT] Not connected, queuing publish to ${topic}:`, message);
+    }
+    console.log(`[MQTT] Publishing to ${topic}:`, message);
+    client.publish(topic, message, options, (error) => {
+      if (error) {
+        console.error(`[MQTT] Publish error to ${topic}:`, error.message);
+      } else {
+        console.log(`[MQTT] Published to ${topic} successfully`);
+      }
+    });
   }, []);
 }
 
