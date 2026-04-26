@@ -19,7 +19,6 @@ DEVICE_ID = "home1"
 
 DHT_PIN = 4
 PIR1_PIN = 5
-PIR2_PIN = 13
 LDR_PIN = 34
 RELAY_PINS = [18, 19, 22, 23]
 BUZZER_PIN = 21
@@ -34,7 +33,6 @@ SWITCH_DEBOUNCE_MS = 80
 BUTTON_DEBOUNCE_MS = 200
 
 pir1_pin = machine.Pin(PIR1_PIN, machine.Pin.IN)
-pir2_pin = machine.Pin(PIR2_PIN, machine.Pin.IN)
 ldr_pin = machine.ADC(machine.Pin(LDR_PIN))
 ldr_pin.atten(machine.ADC.ATTN_11DB)
 buzzer_pin = machine.Pin(BUZZER_PIN, machine.Pin.OUT, value=0)
@@ -124,24 +122,22 @@ def read_sensors():
         humidity = dht_sensor.humidity()
     except Exception as error:
         print("DHT error:", error)
-        return None, None, None, None, None, None
+        return None, None, None, None, None
 
     pir1 = bool(pir1_pin.value())
-    pir2 = bool(pir2_pin.value())
     ldr = ldr_pin.read()
-    motion = pir1 or pir2
+    motion = pir1
 
-    return temp, humidity, pir1, pir2, motion, ldr
+    return temp, humidity, pir1, motion, ldr
 
 
-def publish_data(temp, humidity, pir1, pir2, motion, ldr):
+def publish_data(temp, humidity, pir1, motion, ldr):
     payload = json.dumps(
         {
             "device": DEVICE_ID,
             "temp": temp,
             "humidity": humidity,
             "pir1": pir1,
-            "pir2": pir2,
             "motion": motion,
             "ldr": ldr,
             "sw_light1": not switch_pins[0].value(),
@@ -245,9 +241,9 @@ while True:
 
     now = time.ticks_ms()
     if time.ticks_diff(now, last_publish) >= SENSOR_INTERVAL_MS:
-        temp, humidity, pir1, pir2, motion, ldr = read_sensors()
+        temp, humidity, pir1, motion, ldr = read_sensors()
         if temp is not None:
-            publish_data(temp, humidity, pir1, pir2, motion, ldr)
+            publish_data(temp, humidity, pir1, motion, ldr)
         last_publish = now
 
     time.sleep_ms(100)

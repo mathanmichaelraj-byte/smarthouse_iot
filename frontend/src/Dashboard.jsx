@@ -113,7 +113,6 @@ export default function Dashboard() {
     temp: null,
     humidity: null,
     pir1: null,
-    pir2: null,
     motion: null,
     ldr: null,
   });
@@ -160,7 +159,6 @@ export default function Dashboard() {
             temp: currentDevice.temp ?? null,
             humidity: currentDevice.humidity ?? null,
             pir1: currentDevice.pir1 ?? null,
-            pir2: currentDevice.pir2 ?? null,
             motion: currentDevice.motion ?? null,
             ldr: currentDevice.ldr ?? null,
           });
@@ -197,7 +195,6 @@ export default function Dashboard() {
               temp: latest.temp ?? null,
               humidity: latest.humidity ?? null,
               pir1: latest.pir1 ?? null,
-              pir2: latest.pir2 ?? null,
               motion: latest.motion ?? null,
               ldr: latest.ldr ?? null,
             });
@@ -233,7 +230,6 @@ export default function Dashboard() {
         temp: parsed.temp ?? null,
         humidity: parsed.humidity ?? null,
         pir1: parsed.pir1 ?? null,
-        pir2: parsed.pir2 ?? null,
         motion: parsed.motion ?? null,
         ldr: parsed.ldr ?? null,
       });
@@ -301,7 +297,6 @@ export default function Dashboard() {
 
   const motionLabel = sensor.motion === null ? "Unknown" : sensor.motion ? "Detected" : "Clear";
   const pir1Label = sensor.pir1 === null ? "Unknown" : sensor.pir1 ? "Detected" : "Clear";
-  const pir2Label = sensor.pir2 === null ? "Unknown" : sensor.pir2 ? "Detected" : "Clear";
 
   function handleManualChange(target, nextState) {
     const topic = `${DEVICE}/${target}_manual`;
@@ -343,8 +338,7 @@ export default function Dashboard() {
       <section style={styles.sensorGrid}>
         <SensorCard label="Temperature" value={sensor.temp} unit="°C" accent="#f97316" />
         <SensorCard label="Humidity" value={sensor.humidity} unit="%" accent="#38bdf8" />
-        <SensorCard label="PIR 1" value={pir1Label} unit="" accent="#22c55e" />
-        <SensorCard label="PIR 2" value={pir2Label} unit="" accent="#22c55e" />
+        <SensorCard label="PIR" value={pir1Label} unit="" accent="#22c55e" />
         <SensorCard label="Motion" value={motionLabel} unit="" accent="#22c55e" />
         <SensorCard label="LDR" value={sensor.ldr} unit="" accent="#f59e0b" />
       </section>

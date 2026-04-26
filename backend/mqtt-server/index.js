@@ -27,7 +27,6 @@ const ReadingSchema = new mongoose.Schema({
   temp: Number,
   humidity: Number,
   pir1: Boolean,
-  pir2: Boolean,
   motion: Boolean,
   ldr: Number,
   sw_light1: Boolean,
@@ -62,7 +61,6 @@ const DeviceStateSchema = new mongoose.Schema({
   temp: { type: Number, default: 0 },
   humidity: { type: Number, default: 0 },
   pir1: { type: Boolean, default: false },
-  pir2: { type: Boolean, default: false },
   motion: { type: Boolean, default: false },
   ldr: { type: Number, default: 0 },
   ml_enabled: { type: Boolean, default: true },
@@ -78,7 +76,6 @@ const ManualActionSchema = new mongoose.Schema({
   temp: Number,
   humidity: Number,
   pir1: Boolean,
-  pir2: Boolean,
   motion: Boolean,
   ldr: Number,
   hour: Number,
@@ -122,7 +119,6 @@ function createDefaultState() {
     temp: 0,
     humidity: 0,
     pir1: false,
-    pir2: false,
     motion: false,
     ldr: 0,
     ml_enabled: true,
@@ -190,11 +186,10 @@ function normalizeSensorPayload(message) {
   const temp = Number(parsed.temp);
   const humidity = Number(parsed.humidity);
   const pir1 = normalizeBoolean(parsed.pir1);
-  const pir2 = normalizeBoolean(parsed.pir2);
-  const motion = normalizeBoolean(parsed.motion);
+  const motion = normalizeBoolean(parsed.motion) ?? pir1;
   const ldr = Number(parsed.ldr);
 
-  if (Number.isNaN(temp) || Number.isNaN(humidity) || pir1 === null || pir2 === null || motion === null || Number.isNaN(ldr)) {
+  if (Number.isNaN(temp) || Number.isNaN(humidity) || pir1 === null || motion === null || Number.isNaN(ldr)) {
     return null;
   }
 
@@ -206,7 +201,6 @@ function normalizeSensorPayload(message) {
     temp,
     humidity,
     pir1,
-    pir2,
     motion,
     ldr,
     sw_light1: normalizeBoolean(parsed.sw_light1),
@@ -235,7 +229,6 @@ function buildDatasetRow(snapshot, stateLike) {
     temp: snapshot.temp,
     humidity: snapshot.humidity,
     pir1: snapshot.pir1 ? 1 : 0,
-    pir2: snapshot.pir2 ? 1 : 0,
     motion: snapshot.motion ? 1 : 0,
     ldr: snapshot.ldr,
     hour: snapshot.hour,
@@ -314,7 +307,6 @@ function stateDocument() {
     temp: homeState.temp,
     humidity: homeState.humidity,
     pir1: homeState.pir1,
-    pir2: homeState.pir2,
     motion: homeState.motion,
     ldr: homeState.ldr,
     ml_enabled: homeState.ml_enabled,
@@ -349,7 +341,6 @@ async function hydrateHomeState() {
     temp: Number(existing.temp ?? 0),
     humidity: Number(existing.humidity ?? 0),
     pir1: Boolean(existing.pir1),
-    pir2: Boolean(existing.pir2),
     motion: Boolean(existing.motion),
     ldr: Number(existing.ldr ?? 0),
     ml_enabled: Boolean(existing.ml_enabled ?? true),
@@ -425,7 +416,6 @@ async function handleManualTopic(target, payload) {
     temp: sensorSnapshot?.temp,
     humidity: sensorSnapshot?.humidity,
     pir1: sensorSnapshot?.pir1,
-    pir2: sensorSnapshot?.pir2,
     motion: sensorSnapshot?.motion,
     ldr: sensorSnapshot?.ldr,
     hour: sensorSnapshot?.hour,
@@ -469,7 +459,7 @@ function normalizePrediction(prediction) {
 }
 
 function anomalyMessage(snapshot, anomalyResult) {
-  return `Anomaly detected: temp=${snapshot.temp}C humidity=${snapshot.humidity}% pir1=${snapshot.pir1} pir2=${snapshot.pir2} motion=${snapshot.motion} ldr=${snapshot.ldr} score=${anomalyResult.score}`;
+  return `Anomaly detected: temp=${snapshot.temp}C humidity=${snapshot.humidity}% pir1=${snapshot.pir1} motion=${snapshot.motion} ldr=${snapshot.ldr} score=${anomalyResult.score}`;
 }
 
 async function handleSensorMessage(payload) {
@@ -480,7 +470,6 @@ async function handleSensorMessage(payload) {
   homeState.temp = sensorSnapshot.temp;
   homeState.humidity = sensorSnapshot.humidity;
   homeState.pir1 = sensorSnapshot.pir1;
-  homeState.pir2 = sensorSnapshot.pir2;
   homeState.motion = sensorSnapshot.motion;
   homeState.ldr = sensorSnapshot.ldr;
   homeState.light1 = sensorSnapshot.relay_light1;
@@ -495,7 +484,6 @@ async function handleSensorMessage(payload) {
       temp: sensorSnapshot.temp,
       humidity: sensorSnapshot.humidity,
       pir1: sensorSnapshot.pir1,
-      pir2: sensorSnapshot.pir2,
       motion: sensorSnapshot.motion,
       ldr: sensorSnapshot.ldr,
       sw_light1: sensorSnapshot.sw_light1,

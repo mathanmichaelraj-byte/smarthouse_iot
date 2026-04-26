@@ -9,7 +9,7 @@ const char* ssid = "mahii";
 const char* password = "hidamayulu";
 
 // ---------------- MQTT ----------------
-const char* mqttServer = "broker.hivemq.com";
+const char* mqttServer = "test.mosquitto.org";
 const int mqttPort = 1883;
 const char* deviceId = "home1";
 
@@ -17,7 +17,6 @@ const char* deviceId = "home1";
 #define DHTPIN 4
 #define DHTTYPE DHT11
 #define PIR1_PIN 5
-#define PIR2_PIN 13
 #define LDR_PIN 34
 #define RELAY_LIGHT1_PIN 18
 #define RELAY_LIGHT2_PIN 19
@@ -203,9 +202,8 @@ void publishSensorData() {
   }
 
   bool pir1 = digitalRead(PIR1_PIN);
-  bool pir2 = digitalRead(PIR2_PIN);
   int ldr = analogRead(LDR_PIN);
-  bool motion = pir1 || pir2;
+  bool motion = pir1;
 
   StaticJsonDocument<512> doc;
 
@@ -213,7 +211,6 @@ void publishSensorData() {
   doc["temp"] = temp;
   doc["humidity"] = hum;
   doc["pir1"] = pir1;
-  doc["pir2"] = pir2;
   doc["motion"] = motion;
   doc["ldr"] = ldr;
 
@@ -233,7 +230,7 @@ void publishSensorData() {
   char payload[512];
   serializeJson(doc, payload);
 
-  if (!client.publish((String(deviceId) + "/sensor").c_str(), payload, true)) {
+  if (!client.publish((String(deviceId) + "/sensor").c_str(), payload)) {
     Serial.println("Publish failed");
   } else {
     Serial.println("Sensor data sent");
@@ -316,7 +313,6 @@ void setup() {
 
   // Sensor pins
   pinMode(PIR1_PIN, INPUT);
-  pinMode(PIR2_PIN, INPUT);
   pinMode(LDR_PIN, INPUT);
 
   // Output pins
