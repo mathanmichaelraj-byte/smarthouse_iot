@@ -12,7 +12,7 @@ from umqtt.simple import MQTTClient
 
 SSID = "YourSSID"
 PASSWORD = "YourPassword"
-MQTT_HOST = "broker.hivemq.com"
+MQTT_HOST = "192.168.1.100"  # Update to your laptop's LAN IP
 MQTT_PORT = 1883
 CLIENT_ID = b"esp32-mp-home1"
 DEVICE_ID = "home1"

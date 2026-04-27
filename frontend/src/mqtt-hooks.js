@@ -1,43 +1,44 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import mqtt from "mqtt";
 
-const BROKER_WS = import.meta.env.VITE_MQTT_WS || "ws://broker.hivemq.com:8000/mqtt";
+const BROKER_WS = import.meta.env.VITE_MQTT_WS || "ws://localhost:8000/mqtt";
 
 let sharedClient = null;
 const subscribers = {};
 let isConnected = false;
 
 function getClient() {
-  if (!sharedClient || sharedClient.disconnected) {
-    console.log("[MQTT] Creating new client, connecting to:", BROKER_WS);
-    sharedClient = mqtt.connect(BROKER_WS, {
-      clientId: `smart-home-dashboard-${Math.random().toString(16).slice(2)}`,
-      clean: true,
-      reconnectPeriod: 1000,
-    });
+  if (sharedClient) return sharedClient;
 
-    sharedClient.on("connect", () => {
-      isConnected = true;
-      console.log("[MQTT] Connected");
-    });
-    sharedClient.on("reconnect", () => console.log("[MQTT] Reconnecting"));
-    sharedClient.on("error", (error) => {
-      isConnected = false;
-      console.error("[MQTT] Error:", error.message);
-    });
-    sharedClient.on("offline", () => {
-      isConnected = false;
-      console.log("[MQTT] Offline");
-    });
-    sharedClient.on("message", (topic, payload) => {
-      const handlers = subscribers[topic];
-      if (!handlers) return;
+  sharedClient = mqtt.connect(BROKER_WS, {
+    clientId: `smart-home-dashboard-${Math.random().toString(16).slice(2)}`,
+    clean: true,
+    protocolVersion: 4,
+    reconnectPeriod: 2000,
+  });
 
-      const message = payload.toString();
-      console.log(`[MQTT] Message on ${topic}:`, message);
-      handlers.forEach((callback) => callback(message, topic));
+  sharedClient.on("connect", () => {
+    isConnected = true;
+    Object.keys(subscribers).forEach((topic) => {
+      sharedClient.subscribe(topic);
     });
-  }
+  });
+
+  sharedClient.on("error", (error) => {
+    isConnected = false;
+    console.error("[MQTT] Error:", error.message);
+  });
+
+  sharedClient.on("offline", () => {
+    isConnected = false;
+  });
+
+  sharedClient.on("message", (topic, payload) => {
+    const handlers = subscribers[topic];
+    if (!handlers) return;
+    const message = payload.toString();
+    handlers.forEach((callback) => callback(message, topic));
+  });
 
   return sharedClient;
 }
@@ -54,25 +55,12 @@ export function useMQTTSubscribe(topic, onMessage) {
 
     if (!subscribers[topic]) subscribers[topic] = new Set();
     subscribers[topic].add(handler);
-    
-    if (isConnected) {
-      client.subscribe(topic, (error) => {
-        if (error) {
-          console.error(`[MQTT] Subscribe error for ${topic}:`, error.message);
-        } else {
-          console.log(`[MQTT] Subscribed to ${topic}`);
-        }
-      });
-    } else {
-      console.log(`[MQTT] Queueing subscription for ${topic} (not connected yet)`);
-      client.subscribe(topic, (error) => {
-        if (error) {
-          console.error(`[MQTT] Subscribe error for ${topic}:`, error.message);
-        } else {
-          console.log(`[MQTT] Subscribed to ${topic}`);
-        }
-      });
-    }
+
+    client.subscribe(topic, (error) => {
+      if (error) {
+        console.error(`[MQTT] Subscribe error for ${topic}:`, error.message);
+      }
+    });
 
     return () => {
       subscribers[topic]?.delete(handler);
@@ -90,17 +78,31 @@ export function useMQTTPublish() {
   return useCallback((topic, message, options) => {
     const client = getClient();
     if (!isConnected) {
-      console.warn(`[MQTT] Not connected, queuing publish to ${topic}:`, message);
+      console.warn(`[MQTT] Not connected yet, publish will wait: ${topic}`);
     }
-    console.log(`[MQTT] Publishing to ${topic}:`, message);
+
     client.publish(topic, message, options, (error) => {
       if (error) {
         console.error(`[MQTT] Publish error to ${topic}:`, error.message);
-      } else {
-        console.log(`[MQTT] Published to ${topic} successfully`);
       }
     });
   }, []);
+}
+
+export function useMQTTConnectionState() {
+  const [connected, setConnected] = useState(isConnected);
+  useEffect(() => {
+    const client = getClient();
+    const onConnect = () => setConnected(true);
+    const onOffline = () => setConnected(false);
+    client.on("connect", onConnect);
+    client.on("offline", onOffline);
+    return () => {
+      client.off("connect", onConnect);
+      client.off("offline", onOffline);
+    };
+  }, []);
+  return connected;
 }
 
 export function useMQTTTopicState(topic, initialValue = null) {

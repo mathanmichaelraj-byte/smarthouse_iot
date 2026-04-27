@@ -10,14 +10,11 @@ import {
   YAxis,
 } from "recharts";
 
-import { useMQTTPublish, useMQTTSubscribe } from "./mqtt-hooks";
+import { useMQTTConnectionState, useMQTTPublish, useMQTTSubscribe } from "./mqtt-hooks";
 
 const API = import.meta.env.VITE_API || "http://localhost:3001";
 const DEVICE = "home1";
 const HISTORY_LIMIT = 60;
-
-console.log("[Dashboard] API endpoint:", API);
-console.log("[Dashboard] Device ID:", DEVICE);
 
 const DEVICE_CONFIG = [
   { key: "light1", label: "Light 1", accent: "#f59e0b" },
@@ -76,7 +73,7 @@ function DeviceCard({ label, target, accent, isOn, onChange }) {
   );
 }
 
-function SystemControlCard({ label, target, isOn, onChange }) {
+function SystemControlCard({ label, target, isOn, onChange, onLabel = "Enable", offLabel = "Disable", hint = "System control" }) {
   return (
     <div style={styles.deviceCard}>
       <div style={styles.deviceHeader}>
@@ -95,20 +92,22 @@ function SystemControlCard({ label, target, isOn, onChange }) {
 
       <div style={styles.buttonRow}>
         <button style={{ ...styles.button, ...styles.onButton }} onClick={() => onChange(target, true)}>
-          Enable
+          {onLabel}
         </button>
         <button style={{ ...styles.button, ...styles.offButton }} onClick={() => onChange(target, false)}>
-          Disable
+          {offLabel}
         </button>
       </div>
 
-      <div style={styles.deviceHint}>System control</div>
+      <div style={styles.deviceHint}>{hint}</div>
     </div>
   );
 }
 
 export default function Dashboard() {
   const publish = useMQTTPublish();
+  const mqttConnected = useMQTTConnectionState();
+  const [health, setHealth] = useState(null);
   const [sensor, setSensor] = useState({
     temp: null,
     humidity: null,
@@ -129,32 +128,24 @@ export default function Dashboard() {
 
     async function loadInitialData() {
       try {
-        console.log("[Dashboard] Fetching initial data from", API);
-        const [devicesResponse, readingsResponse] = await Promise.all([
+        const [devicesResponse, readingsResponse, healthResponse] = await Promise.all([
           fetch(`${API}/api/devices`),
           fetch(`${API}/api/readings?device=${DEVICE}&limit=${HISTORY_LIMIT}`),
+          fetch(`${API}/api/health`),
         ]);
 
-        if (!devicesResponse.ok) {
-          console.error("[Dashboard] Devices request failed:", devicesResponse.status, devicesResponse.statusText);
-        }
-        if (!readingsResponse.ok) {
-          console.error("[Dashboard] Readings request failed:", readingsResponse.status, readingsResponse.statusText);
-        }
-
-        const [devices, readings] = await Promise.all([
+        const [devices, readings, healthSnapshot] = await Promise.all([
           devicesResponse.json(),
           readingsResponse.json(),
+          healthResponse.json(),
         ]);
-
-        console.log("[Dashboard] Loaded devices:", devices);
-        console.log("[Dashboard] Loaded readings:", readings);
 
         if (cancelled) return;
 
+        setHealth(healthSnapshot);
+
         const currentDevice = Array.isArray(devices) ? devices.find((item) => item.device === DEVICE) : null;
         if (currentDevice) {
-          console.log("[Dashboard] Found current device in devices list");
           setSensor({
             temp: currentDevice.temp ?? null,
             humidity: currentDevice.humidity ?? null,
@@ -175,7 +166,6 @@ export default function Dashboard() {
         }
 
         if (Array.isArray(readings)) {
-          console.log("[Dashboard] Processing", readings.length, "readings");
           setHistory(
             readings.map((reading) => ({
               time: new Date(reading.timestamp).toLocaleTimeString([], {
@@ -185,12 +175,12 @@ export default function Dashboard() {
               }),
               temp: reading.temp,
               humidity: reading.humidity,
+              ldr: reading.ldr,
             }))
           );
 
           const latest = readings[readings.length - 1];
           if (!currentDevice && latest) {
-            console.log("[Dashboard] Using latest reading as fallback");
             setSensor({
               temp: latest.temp ?? null,
               humidity: latest.humidity ?? null,
@@ -212,7 +202,6 @@ export default function Dashboard() {
         }
       } catch (error) {
         console.error("[Dashboard] Initial load failed:", error.message);
-        console.error("[Dashboard] Check if backend is running at", API);
       }
     }
 
@@ -223,22 +212,34 @@ export default function Dashboard() {
     };
   }, []);
 
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      try {
+        const response = await fetch(`${API}/api/health`);
+        const snapshot = await response.json();
+        setHealth(snapshot);
+      } catch {}
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, []);
+
   useMQTTSubscribe(`${DEVICE}/sensor`, (message) => {
     try {
       const parsed = JSON.parse(message);
       setSensor({
         temp: parsed.temp ?? null,
         humidity: parsed.humidity ?? null,
-        pir1: parsed.pir1 ?? null,
-        motion: parsed.motion ?? null,
+        pir1: parsed.pir1 != null ? Boolean(parsed.pir1) : null,
+        motion: parsed.motion != null ? Boolean(parsed.motion) : null,
         ldr: parsed.ldr ?? null,
       });
       setDeviceStates((previous) => ({
         ...previous,
-        light1: typeof parsed.relay_light1 === "boolean" ? parsed.relay_light1 : previous.light1,
-        light2: typeof parsed.relay_light2 === "boolean" ? parsed.relay_light2 : previous.light2,
-        fan1: typeof parsed.relay_fan1 === "boolean" ? parsed.relay_fan1 : previous.fan1,
-        fan2: typeof parsed.relay_fan2 === "boolean" ? parsed.relay_fan2 : previous.fan2,
+        light1: parsed.relay_light1 != null ? Boolean(parsed.relay_light1) : previous.light1,
+        light2: parsed.relay_light2 != null ? Boolean(parsed.relay_light2) : previous.light2,
+        fan1: parsed.relay_fan1 != null ? Boolean(parsed.relay_fan1) : previous.fan1,
+        fan2: parsed.relay_fan2 != null ? Boolean(parsed.relay_fan2) : previous.fan2,
       }));
       setSystemStates((previous) => ({
         ...previous,
@@ -255,6 +256,7 @@ export default function Dashboard() {
           }),
           temp: parsed.temp,
           humidity: parsed.humidity,
+          ldr: parsed.ldr,
         },
       ]);
     } catch (error) {
@@ -295,22 +297,16 @@ export default function Dashboard() {
     setSystemStates((previous) => ({ ...previous, buzzer_mute: message === "ON" }));
   });
 
-  const motionLabel = sensor.motion === null ? "Unknown" : sensor.motion ? "Detected" : "Clear";
-  const pir1Label = sensor.pir1 === null ? "Unknown" : sensor.pir1 ? "Detected" : "Clear";
+  const motionLabel = sensor.motion === null ? "Unknown" : sensor.motion ? "⚡ Detected" : "Clear";
+  const pir1Label = sensor.pir1 === null ? "Unknown" : sensor.pir1 ? "⚡ Detected" : "Clear";
 
   function handleManualChange(target, nextState) {
-    const topic = `${DEVICE}/${target}_manual`;
-    const payload = nextState ? "ON" : "OFF";
-    console.log("[Dashboard] Button clicked:", { target, nextState, topic, payload });
-    publish(topic, payload);
+    publish(`${DEVICE}/${target}_manual`, nextState ? "ON" : "OFF");
   }
 
   function handleSystemChange(target, nextState) {
     setSystemStates((previous) => ({ ...previous, [target]: nextState }));
-    const topic = `${DEVICE}/${target}`;
-    const payload = nextState ? "ON" : "OFF";
-    console.log("[Dashboard] System change:", { target, nextState, topic, payload });
-    publish(topic, payload, { retain: true });
+    publish(`${DEVICE}/${target}`, nextState ? "ON" : "OFF", { retain: true });
   }
 
   return (
@@ -322,6 +318,33 @@ export default function Dashboard() {
           <p style={styles.subtitle}>
             Home ID <strong>{DEVICE}</strong> · MQTT live control · Manual actions pause automation for 5 minutes
           </p>
+        </div>
+
+        <div style={styles.statusPanel}>
+          <div style={styles.statusItem}>
+            <span style={styles.statusLabel}>Broker</span>
+            <span style={{ ...styles.statusValue, color: health?.broker?.connected ? "#4ade80" : "#fca5a5" }}>
+              {health?.broker?.connected ? "Online" : "Offline"}
+            </span>
+          </div>
+          <div style={styles.statusItem}>
+            <span style={styles.statusLabel}>Dashboard WS</span>
+            <span style={{ ...styles.statusValue, color: mqttConnected ? "#4ade80" : "#fca5a5" }}>
+              {mqttConnected ? "Connected" : "Connecting..."}
+            </span>
+          </div>
+          <div style={styles.statusItem}>
+            <span style={styles.statusLabel}>MongoDB</span>
+            <span style={{ ...styles.statusValue, color: health?.mongodb?.connected ? "#4ade80" : "#fca5a5" }}>
+              {health?.mongodb?.connected ? "Connected" : "Disconnected"}
+            </span>
+          </div>
+          <div style={styles.statusItem}>
+            <span style={styles.statusLabel}>ML</span>
+            <span style={{ ...styles.statusValue, color: health?.ml?.enabled ? "#4ade80" : "#fbbf24" }}>
+              {health?.ml?.enabled ? "Enabled" : "Fallback only"}
+            </span>
+          </div>
         </div>
       </div>
 
@@ -338,8 +361,8 @@ export default function Dashboard() {
       <section style={styles.sensorGrid}>
         <SensorCard label="Temperature" value={sensor.temp} unit="°C" accent="#f97316" />
         <SensorCard label="Humidity" value={sensor.humidity} unit="%" accent="#38bdf8" />
-        <SensorCard label="PIR" value={pir1Label} unit="" accent="#22c55e" />
-        <SensorCard label="Motion" value={motionLabel} unit="" accent="#22c55e" />
+        <SensorCard label="PIR" value={pir1Label} unit="" accent={sensor.pir1 ? "#f97316" : "#22c55e"} />
+        <SensorCard label="Motion" value={motionLabel} unit="" accent={sensor.motion ? "#f97316" : "#22c55e"} />
         <SensorCard label="LDR" value={sensor.ldr} unit="" accent="#f59e0b" />
       </section>
 
@@ -357,8 +380,24 @@ export default function Dashboard() {
       </section>
 
       <section style={styles.systemControls}>
-        <SystemControlCard label="ML Mode" target="ml_mode" isOn={systemStates.ml_mode} onChange={handleSystemChange} />
-        <SystemControlCard label="Buzzer Mute" target="buzzer_mute" isOn={systemStates.buzzer_mute} onChange={handleSystemChange} />
+        <SystemControlCard
+          label="ML Mode"
+          target="ml_mode"
+          isOn={systemStates.ml_mode}
+          onChange={handleSystemChange}
+          onLabel="Enable"
+          offLabel="Disable"
+          hint="Enables ML-based automation. Off = fallback rules only"
+        />
+        <SystemControlCard
+          label="Buzzer Mute"
+          target="buzzer_mute"
+          isOn={systemStates.buzzer_mute}
+          onChange={handleSystemChange}
+          onLabel="Mute"
+          offLabel="Unmute"
+          hint="Muted = alerts still logged but buzzer stays silent"
+        />
       </section>
 
       <section style={styles.chartCard}>
@@ -373,11 +412,13 @@ export default function Dashboard() {
           <LineChart data={history}>
             <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
             <XAxis dataKey="time" tick={{ fill: "#94a3b8", fontSize: 11 }} minTickGap={24} />
-            <YAxis tick={{ fill: "#94a3b8", fontSize: 11 }} />
+            <YAxis yAxisId={0} tick={{ fill: "#94a3b8", fontSize: 11 }} />
+            <YAxis yAxisId="ldr" orientation="right" tick={{ fill: "#f59e0b", fontSize: 11 }} />
             <Tooltip contentStyle={styles.tooltip} />
             <Legend />
             <Line type="monotone" dataKey="temp" stroke="#f97316" strokeWidth={3} dot={false} name="Temp (°C)" />
             <Line type="monotone" dataKey="humidity" stroke="#38bdf8" strokeWidth={3} dot={false} name="Humidity (%)" />
+            <Line type="monotone" dataKey="ldr" stroke="#f59e0b" strokeWidth={2} dot={false} name="LDR" yAxisId="ldr" />
           </LineChart>
         </ResponsiveContainer>
       </section>
@@ -387,7 +428,7 @@ export default function Dashboard() {
         <h2 style={styles.sectionTitle}>Recent notifications</h2>
 
         {alerts.length === 0 ? (
-          <div style={styles.emptyState}>No live alerts yet. The banner will light up when `home1/alert` receives a message.</div>
+          <div style={styles.emptyState}>No live alerts yet. The banner will update when `home1/alert` receives a message.</div>
         ) : (
           alerts.map((alert, index) => (
             <div key={`${alert.time}-${index}`} style={styles.alertRow}>
@@ -411,6 +452,10 @@ const styles = {
     fontFamily: "'JetBrains Mono', monospace",
   },
   hero: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    gap: 20,
     marginBottom: 22,
     padding: "28px",
     borderRadius: 24,
@@ -436,6 +481,29 @@ const styles = {
     color: "#93a4bb",
     fontSize: 14,
     maxWidth: 700,
+  },
+  statusPanel: {
+    minWidth: 220,
+    display: "grid",
+    gap: 10,
+    padding: "14px 16px",
+    borderRadius: 16,
+    background: "rgba(2,6,23,0.45)",
+    border: "1px solid rgba(148,163,184,0.14)",
+  },
+  statusItem: {
+    display: "flex",
+    justifyContent: "space-between",
+    gap: 12,
+    fontSize: 13,
+  },
+  statusLabel: {
+    color: "#8fa4bd",
+    textTransform: "uppercase",
+    letterSpacing: 1.1,
+  },
+  statusValue: {
+    fontWeight: 700,
   },
   alertBanner: {
     display: "flex",

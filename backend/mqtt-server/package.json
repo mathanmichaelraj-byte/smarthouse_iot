@@ -6,10 +6,11 @@
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
-    "init-db": "node init_mongodb.js"
+    "init-db": "node init_mongodb.js",
+    "smoke-test": "node smoke_test.js"
   },
   "dependencies": {
-    "aedes": "^1.0.2",
+    "aedes": "^0.51.3",
     "cors": "^2.8.6",
     "dotenv": "^16.3.1",
     "express": "^4.22.1",

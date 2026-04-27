@@ -6,8 +6,8 @@ const FALLBACK_RULES = [
     state: true,
   },
   {
-    name: "Night motion -> both lights ON",
-    condition: "(hour >= 18 || hour < 6) && motion === true",
+    name: "Dark room with motion -> both lights ON",
+    condition: "ldr < 1000 && motion === true",
     targets: ["light1", "light2"],
     state: true,
   },
@@ -18,7 +18,7 @@ function isNightHour(hour) {
 }
 
 function buildFallbackDecision({ temp, motion, ldr }) {
-  const isNight = ldr > 3000; // assuming high ldr means night
+  const isNight = ldr < 1000; // low ldr = dark
   const fansOn = temp > 30 && motion === true;
   const lightsOn = isNight && motion === true;
 
@@ -36,6 +36,5 @@ function loadRules() {
 
 module.exports = {
   buildFallbackDecision,
-  isNightHour,
   loadRules,
 };

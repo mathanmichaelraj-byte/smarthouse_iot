@@ -1,18 +1,27 @@
 require("dotenv").config();
 
+const Aedes = require("aedes");
+const aedes = Aedes();
 const cors = require("cors");
 const express = require("express");
 const fs = require("fs/promises");
+const http = require("http");
 const mqtt = require("mqtt");
 const mongoose = require("mongoose");
+const net = require("net");
 const path = require("path");
+const websocketStream = require("websocket-stream");
 
-const { detectAnomaly, predictDeviceAction, scheduleRetrain } = require("./ml_integration");
-const { buildFallbackDecision, isNightHour, loadRules } = require("./rules");
+const { detectAnomaly, getMlStatus, predictDeviceAction, scheduleRetrain } = require("./ml_integration");
+const { buildFallbackDecision, loadRules } = require("./rules");
 
-const MQTT_BROKER = process.env.MQTT_BROKER || "mqtt://broker.hivemq.com";
+const MQTT_BROKER = process.env.MQTT_BROKER || "mqtt://127.0.0.1:1883";
 const MONGO_URI = process.env.MONGO_URI || "mongodb://localhost:27017/smarthome";
 const PORT = Number(process.env.PORT || 3001);
+const LOCAL_MQTT_HOST = process.env.LOCAL_MQTT_HOST || "0.0.0.0";
+const LOCAL_MQTT_PORT = Number(process.env.LOCAL_MQTT_PORT || 1883);
+const LOCAL_MQTT_WS_PORT = Number(process.env.LOCAL_MQTT_WS_PORT || 8000);
+const ENABLE_EMBEDDED_BROKER = (process.env.ENABLE_EMBEDDED_BROKER || "true") !== "false";
 
 const HOME_ID = "home1";
 const CONTROL_TARGETS = ["light1", "light2", "fan1", "fan2"];
@@ -99,6 +108,35 @@ app.use(cors());
 app.use(express.json());
 
 let mqttClient = null;
+let tcpBrokerServer = null;
+let wsBrokerServer = null;
+
+function createHealthSnapshot() {
+  return {
+    ok: Boolean(mqttClient?.connected) && mongoose.connection.readyState === 1,
+    device: HOME_ID,
+    broker: {
+      embedded: ENABLE_EMBEDDED_BROKER,
+      url: MQTT_BROKER,
+      connected: Boolean(mqttClient?.connected),
+      tcpPort: LOCAL_MQTT_PORT,
+      wsPort: LOCAL_MQTT_WS_PORT,
+    },
+    mongodb: {
+      connected: mongoose.connection.readyState === 1,
+      readyState: mongoose.connection.readyState,
+    },
+    ml: getMlStatus(),
+    latestSensorAt: latestSensorSnapshot?.receivedAt ?? null,
+    updatedAt: homeState.updatedAt ?? null,
+  };
+}
+
+function logSensorSummary(sensorSnapshot) {
+  console.log(
+    `[SENSOR] device=${sensorSnapshot.device} temp=${sensorSnapshot.temp} humidity=${sensorSnapshot.humidity} pir1=${sensorSnapshot.pir1} motion=${sensorSnapshot.motion} ldr=${sensorSnapshot.ldr}`
+  );
+}
 
 function defaultOverrideUntil() {
   return {
@@ -180,6 +218,7 @@ function normalizeSensorPayload(message) {
   try {
     parsed = JSON.parse(message);
   } catch {
+    console.warn("[SENSOR] Invalid JSON payload:", message.slice(0, 200));
     return null;
   }
 
@@ -190,6 +229,13 @@ function normalizeSensorPayload(message) {
   const ldr = Number(parsed.ldr);
 
   if (Number.isNaN(temp) || Number.isNaN(humidity) || pir1 === null || motion === null || Number.isNaN(ldr)) {
+    console.warn("[SENSOR] Rejected payload due to invalid fields:", {
+      temp: parsed.temp,
+      humidity: parsed.humidity,
+      pir1: parsed.pir1,
+      motion: parsed.motion,
+      ldr: parsed.ldr,
+    });
     return null;
   }
 
@@ -282,10 +328,6 @@ function manualTopicFor(target) {
 }
 
 function controlTopicFor(target) {
-  return `${HOME_ID}/${target}`;
-}
-
-function systemTopicFor(target) {
   return `${HOME_ID}/${target}`;
 }
 
@@ -434,10 +476,10 @@ async function maybeAppendOverrideTrainingRow(sensorSnapshot) {
   if (!hasAnyActiveOverride(sensorSnapshot.receivedAt)) return;
   queueDatasetRow(
     buildDatasetRow(sensorSnapshot, {
-      light1: sensorSnapshot.light1,
-      light2: sensorSnapshot.light2,
-      fan1: sensorSnapshot.fan1,
-      fan2: sensorSnapshot.fan2,
+      light1: sensorSnapshot.relay_light1,
+      light2: sensorSnapshot.relay_light2,
+      fan1: sensorSnapshot.relay_fan1,
+      fan2: sensorSnapshot.relay_fan2,
     })
   );
 }
@@ -465,6 +507,7 @@ function anomalyMessage(snapshot, anomalyResult) {
 async function handleSensorMessage(payload) {
   const sensorSnapshot = normalizeSensorPayload(payload);
   if (!sensorSnapshot) return;
+  logSensorSummary(sensorSnapshot);
 
   latestSensorSnapshot = sensorSnapshot;
   homeState.temp = sensorSnapshot.temp;
@@ -472,10 +515,6 @@ async function handleSensorMessage(payload) {
   homeState.pir1 = sensorSnapshot.pir1;
   homeState.motion = sensorSnapshot.motion;
   homeState.ldr = sensorSnapshot.ldr;
-  homeState.light1 = sensorSnapshot.relay_light1;
-  homeState.light2 = sensorSnapshot.relay_light2;
-  homeState.fan1 = sensorSnapshot.relay_fan1;
-  homeState.fan2 = sensorSnapshot.relay_fan2;
   homeState.updatedAt = sensorSnapshot.receivedAt;
 
   await Promise.all([
@@ -501,11 +540,18 @@ async function handleSensorMessage(payload) {
     persistHomeState(),
   ]);
 
+  console.log("[SENSOR] Reading stored in MongoDB");
+
   await maybeAppendOverrideTrainingRow(sensorSnapshot);
 
-  // Anomaly detection: night (ldr high) + motion + lights off
-  if (sensorSnapshot.ldr > 3000 && sensorSnapshot.motion && !sensorSnapshot.relay_light1 && !sensorSnapshot.relay_light2) {
-    await logAlert("Suspicious activity", "security", { buzzer: !sensorSnapshot.buzzer_muted });
+  // Security alert: dark (ldr < 1000) + motion + lights off
+  const lightsOff = !homeState.light1 && !homeState.light2;
+  if (sensorSnapshot.ldr < 1000 && sensorSnapshot.motion && lightsOff) {
+    await logAlert(
+      `Motion in the dark! ldr=${sensorSnapshot.ldr} temp=${sensorSnapshot.temp}C`,
+      "security",
+      { buzzer: !homeState.buzzer_muted }
+    );
   }
 
   const [predictionResult, anomalyResult] = await Promise.all([
@@ -532,6 +578,7 @@ async function handleSensorMessage(payload) {
 async function handleControlTopic(target, payload) {
   const nextState = topicStateToBoolean(payload);
   if (nextState === null) return;
+  if (homeState[target] === nextState) return;
 
   homeState[target] = nextState;
   homeState.updatedAt = new Date();
@@ -542,20 +589,34 @@ function attachMqttHandlers() {
   mqttClient.on("connect", () => {
     console.log("MQTT connected to", MQTT_BROKER);
 
-    mqttClient.subscribe(`${HOME_ID}/sensor`);
-    CONTROL_TARGETS.forEach((target) => {
-      mqttClient.subscribe(controlTopicFor(target));
-      mqttClient.subscribe(manualTopicFor(target));
+    mqttClient.subscribe(`${HOME_ID}/sensor`, { qos: 0 }, (error) => {
+      if (error) {
+        console.error("[MQTT] Failed subscribing to sensor topic:", error.message);
+        return;
+      }
+      console.log(`[MQTT] Subscribed ${HOME_ID}/sensor`);
     });
-    mqttClient.subscribe(`${HOME_ID}/ml_mode`);
-    mqttClient.subscribe(`${HOME_ID}/buzzer_mute`);
+    CONTROL_TARGETS.forEach((target) => {
+      mqttClient.subscribe(controlTopicFor(target), { qos: 0 }, (error) => {
+        if (error) {
+          console.error(`[MQTT] Failed subscribing ${controlTopicFor(target)}:`, error.message);
+        }
+      });
+      mqttClient.subscribe(manualTopicFor(target), { qos: 0 }, (error) => {
+        if (error) {
+          console.error(`[MQTT] Failed subscribing ${manualTopicFor(target)}:`, error.message);
+        }
+      });
+    });
+    mqttClient.subscribe(`${HOME_ID}/ml_mode`, { qos: 0 });
+    mqttClient.subscribe(`${HOME_ID}/buzzer_mute`, { qos: 0 });
 
     CONTROL_TARGETS.forEach((target) => {
       mqttClient.publish(manualTopicFor(target), "", { retain: true });
       mqttClient.publish(controlTopicFor(target), homeState[target] ? "ON" : "OFF", { retain: true });
     });
-    mqttClient.publish(systemTopicFor("ml_mode"), homeState.ml_enabled ? "ON" : "OFF", { retain: true });
-    mqttClient.publish(systemTopicFor("buzzer_mute"), homeState.buzzer_muted ? "ON" : "OFF", { retain: true });
+    mqttClient.publish(controlTopicFor("ml_mode"), homeState.ml_enabled ? "ON" : "OFF", { retain: true });
+    mqttClient.publish(controlTopicFor("buzzer_mute"), homeState.buzzer_muted ? "ON" : "OFF", { retain: true });
   });
 
   mqttClient.on("error", (error) => {
@@ -582,6 +643,7 @@ function attachMqttHandlers() {
       if (topic === `${HOME_ID}/ml_mode`) {
         const nextState = topicStateToBoolean(payload);
         if (nextState === null) return;
+        if (homeState.ml_enabled === nextState) return;
 
         homeState.ml_enabled = nextState;
         homeState.updatedAt = new Date();
@@ -593,6 +655,7 @@ function attachMqttHandlers() {
       if (topic === `${HOME_ID}/buzzer_mute`) {
         const nextState = topicStateToBoolean(payload);
         if (nextState === null) return;
+        if (homeState.buzzer_muted === nextState) return;
 
         homeState.buzzer_muted = nextState;
         homeState.updatedAt = new Date();
@@ -616,54 +679,205 @@ function attachMqttHandlers() {
 }
 
 app.get("/api/devices", async (req, res) => {
-  const devices = await DeviceState.find().sort({ device: 1 }).lean();
-  res.json(devices);
+  try {
+    const devices = await DeviceState.find().sort({ device: 1 }).lean();
+    res.json(devices);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 app.get("/api/readings", async (req, res) => {
-  const { device = HOME_ID, limit = 100 } = req.query;
-  const readings = await Reading.find({ device })
-    .sort({ timestamp: -1 })
-    .limit(Number(limit))
-    .lean();
-
-  res.json(readings.reverse());
+  try {
+    const { device = HOME_ID, limit = 100 } = req.query;
+    const readings = await Reading.find({ device })
+      .sort({ timestamp: -1 })
+      .limit(Number(limit))
+      .lean();
+    res.json(readings.reverse());
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 app.post("/api/control", async (req, res) => {
-  const { device = HOME_ID, target, state } = req.body;
+  try {
+    const { device = HOME_ID, target, state } = req.body;
 
-  if (device !== HOME_ID || !CONTROL_TARGETS.includes(target)) {
-    res.status(400).json({ error: "Invalid device or target" });
-    return;
+    if (device !== HOME_ID || !CONTROL_TARGETS.includes(target)) {
+      res.status(400).json({ error: "Invalid device or target" });
+      return;
+    }
+
+    const nextState = topicStateToBoolean(String(state || ""));
+    if (nextState === null) {
+      res.status(400).json({ error: "State must be ON or OFF" });
+      return;
+    }
+
+    const topic = manualTopicFor(target);
+    mqttClient.publish(topic, nextState ? "ON" : "OFF");
+    res.json({ ok: true, topic, state: nextState ? "ON" : "OFF" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
+});
 
-  const nextState = topicStateToBoolean(String(state || ""));
-  if (nextState === null) {
-    res.status(400).json({ error: "State must be ON or OFF" });
-    return;
+app.get("/api/alerts", async (req, res) => {
+  try {
+    const { device = HOME_ID, limit = 50 } = req.query;
+    const alerts = await AlertLog.find({ device })
+      .sort({ timestamp: -1 })
+      .limit(Number(limit))
+      .lean();
+    res.json(alerts.reverse());
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
-
-  const topic = manualTopicFor(target);
-  mqttClient.publish(topic, nextState ? "ON" : "OFF");
-  res.json({ ok: true, topic, state: nextState ? "ON" : "OFF" });
 });
 
 app.get("/api/rules", (req, res) => {
   res.json(loadRules());
 });
 
+app.get("/api/health", (req, res) => {
+  const snapshot = createHealthSnapshot();
+  res.status(snapshot.ok ? 200 : 503).json(snapshot);
+});
+
+async function waitForBrokerReady(port, retries = 20, intervalMs = 250) {
+  for (let i = 0; i < retries; i++) {
+    const ok = await new Promise((resolve) => {
+      const socket = net.createConnection({ port, host: "127.0.0.1" });
+      socket.once("connect", () => { socket.destroy(); resolve(true); });
+      socket.once("error", () => resolve(false));
+    });
+    if (ok) {
+      console.log("[BROKER] TCP port ready");
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  console.warn("[BROKER] TCP port did not become ready in time, proceeding anyway");
+}
+
+async function startEmbeddedBroker() {
+  async function isPortAvailable(port, host) {
+    return new Promise((resolve) => {
+      const tester = net.createServer()
+        .once("error", () => {
+          try {
+            tester.close();
+          } catch {}
+          resolve(false);
+        })
+        .once("listening", () => {
+          tester.close(() => resolve(true));
+        })
+        .listen(port, host);
+    });
+  }
+
+  return new Promise((resolve, reject) => {
+    let listeningCount = 0;
+    let settled = false;
+
+    function completeListen() {
+      listeningCount += 1;
+      if (!settled && listeningCount === 2) {
+        settled = true;
+        console.log(
+          `[BROKER] Embedded broker ready on tcp://${LOCAL_MQTT_HOST}:${LOCAL_MQTT_PORT} and ws://${LOCAL_MQTT_HOST}:${LOCAL_MQTT_WS_PORT}/mqtt`
+        );
+        resolve();
+      }
+    }
+
+    function fail(error) {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    }
+
+    aedes.on("client", (client) => {
+      console.log(`[BROKER] Client connected: ${client?.id || "unknown"}`);
+    });
+
+    aedes.on("clientDisconnect", (client) => {
+      console.log(`[BROKER] Client disconnected: ${client?.id || "unknown"}`);
+    });
+
+    aedes.on("publish", (packet, client) => {
+      if (!client || !packet?.topic || packet.topic.startsWith("$SYS")) return;
+      console.log(`[BROKER] ${client.id} -> ${packet.topic}`);
+    });
+
+    (async () => {
+      try {
+        const tcpFree = await isPortAvailable(LOCAL_MQTT_PORT, LOCAL_MQTT_HOST);
+        if (!tcpFree) {
+          console.warn(`[BROKER] TCP port ${LOCAL_MQTT_PORT} in use, continuing without embedded TCP broker`);
+          completeListen();
+        } else {
+          tcpBrokerServer = net.createServer(aedes.handle);
+          tcpBrokerServer.once("error", fail);
+          tcpBrokerServer.listen(LOCAL_MQTT_PORT, LOCAL_MQTT_HOST, completeListen);
+        }
+
+        const wsFree = await isPortAvailable(LOCAL_MQTT_WS_PORT, LOCAL_MQTT_HOST);
+        if (!wsFree) {
+          console.warn(`[BROKER] WS port ${LOCAL_MQTT_WS_PORT} in use, starting without websocket support`);
+          completeListen();
+        } else {
+          wsBrokerServer = http.createServer();
+          websocketStream.createServer({ server: wsBrokerServer, path: "/mqtt" }, aedes.handle);
+          wsBrokerServer.once("error", fail);
+          wsBrokerServer.listen(LOCAL_MQTT_WS_PORT, LOCAL_MQTT_HOST, completeListen);
+        }
+      } catch (err) {
+        fail(err);
+      }
+    })();
+  });
+}
+
 async function start() {
-  await mongoose.connect(MONGO_URI);
+  if (ENABLE_EMBEDDED_BROKER) {
+    await startEmbeddedBroker();
+  }
+
+  await mongoose.connect(MONGO_URI, { serverSelectionTimeoutMS: 15000 });
   console.log("MongoDB connected");
 
   await hydrateHomeState();
-  mqttClient = mqtt.connect(MQTT_BROKER, { manualConnect: true });
+
+  if (ENABLE_EMBEDDED_BROKER) {
+    await waitForBrokerReady(LOCAL_MQTT_PORT);
+  }
+
+  mqttClient = mqtt.connect(MQTT_BROKER, {
+    manualConnect: true,
+    reconnectPeriod: 3000,
+    connectTimeout: 30000,
+    keepalive: 30,
+    clean: true,
+    protocolVersion: 4,
+    clientId: `backend-${HOME_ID}-${process.pid}`,
+  });
   attachMqttHandlers();
   mqttClient.connect();
 
-  app.listen(PORT, () => {
+  const httpServer = app.listen(PORT, () => {
     console.log(`Backend running on http://localhost:${PORT}`);
+  });
+
+  httpServer.on("error", (err) => {
+    if (err && err.code === "EADDRINUSE") {
+      console.error(`Port ${PORT} already in use. Exiting.`);
+      process.exit(1);
+    }
+    console.error("HTTP server error:", err.message);
+    process.exit(1);
   });
 }
 

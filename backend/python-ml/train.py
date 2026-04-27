@@ -2,11 +2,11 @@
 Train smart-home control and anomaly models.
 
 Control model:
-  Features -> [temp, humidity, motion, hour]
+  Features -> [temp, humidity, motion, ldr]
   Targets  -> [light1, light2, fan1, fan2]
 
 Anomaly model:
-  Features -> [temp, humidity, motion, hour]
+  Features -> [temp, humidity, motion, ldr]
 """
 
 import json

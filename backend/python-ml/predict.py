@@ -54,6 +54,12 @@ def main():
 
     features = [[temp, humidity, motion, ldr]]
     predictions = model.predict(features)[0]
+    # predictions is a 1-D array [light1, light2, fan1, fan2] for multi-output models
+    if hasattr(predictions, '__len__') and len(predictions) == len(TARGETS):
+        result = {target: bool(predictions[index]) for index, target in enumerate(TARGETS)}
+    else:
+        emit_null()
+        return
 
     confidence = 0.0
     try:
@@ -66,10 +72,6 @@ def main():
     except Exception:
         confidence = 0.0
 
-    result = {
-        target: bool(predictions[index])
-        for index, target in enumerate(TARGETS)
-    }
     result["confidence"] = round(confidence, 3)
     print(json.dumps(result))
 
