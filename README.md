@@ -24,7 +24,11 @@ Python ML -> invoked by backend when Python is available
 - retained control topics for fast recovery after reconnect
 - manual override learning dataset capture
 - fallback automation rules even when ML is unavailable
-- live alerts and buzzer pulse for suspicious nighttime motion
+- live alerts and buzzer pulse for suspicious nighttime motion (ldr > 3000 + motion + lights off)
+- ML anomaly detection via IsolationForest with alert publishing
+- periodic model retraining triggered by manual override actions
+- live MQTT WebSocket connection status indicator in dashboard
+- LDR history chart alongside temperature and humidity
 - backend smoke test for verifying `MQTT -> backend -> MongoDB`
 
 ## Project Layout
@@ -82,6 +86,8 @@ smarthouse_iot/
   publishes a manual control command
 - `GET /api/rules`
   current fallback rule set
+- `GET /api/alerts?device=home1&limit=50`
+  recent alert log from MongoDB
 - `GET /api/health`
   broker, MongoDB, and ML status summary
 
@@ -95,10 +101,22 @@ npm install
 npm start
 ```
 
+For development with auto-restart on file changes:
+
+```powershell
+npm run dev
+```
+
 The backend starts:
 - embedded MQTT TCP broker on `1883`
 - embedded MQTT WebSocket broker on `8000`
 - REST API on `3001`
+
+To initialise MongoDB indexes and seed the default device state (run once):
+
+```powershell
+npm run init-db
+```
 
 ### 2. Frontend
 
@@ -107,6 +125,8 @@ cd frontend
 npm install
 npm run dev
 ```
+
+Dashboard runs at `http://localhost:3000`.
 
 ### 3. Python ML
 
@@ -175,6 +195,8 @@ npm run build
 - If the dashboard cannot connect, make sure the backend is running and WebSocket MQTT is available on `ws://localhost:8000/mqtt`.
 - If ML is unavailable, the backend will continue running with fallback rules instead of crashing.
 - If controls appear inverted, adjust the switch interpretation in the firmware where `reading == LOW` is mapped to `ON`.
+- If the backend logs `MQTT error: connack timeout` on startup, a stale `node` process is likely holding port `1883`. Run `netstat -ano | findstr :1883` to find the PID and kill it with `taskkill /PID <pid> /F`, then restart.
+- MongoDB Atlas connection failures (`querySrv ECONNREFUSED`) mean your current IP is not whitelisted. Go to Atlas → Security → Network Access and add your current IP.
 
 ## Finished State
 
@@ -184,3 +206,15 @@ The project is considered complete when:
 - frontend loads and shows live status
 - ESP32 logs `[SENSOR] Published OK`
 - backend logs `[SENSOR] Reading stored in MongoDB`
+
+## Recent Updates
+
+- **Aedes broker fix** — downgraded from `aedes@1.0.2` to `aedes@0.51.3` to fix `connack timeout` on Node.js v22+. The 1.x release is broken on Node 22+ (never sends CONNACK); 0.51.3 is stable. Constructor API changed from `new Aedes()` to `Aedes()`.
+- **Broker readiness check** — backend now actively polls port 1883 before connecting the MQTT client instead of using a blind delay.
+- **MQTT client deduplication** — fixed a bug in `mqtt-hooks.js` where a new WebSocket client was created on every reconnect, causing multiple simultaneous dashboard connections to the broker. Client is now created once and topics are resubscribed on reconnect.
+- **Sensor boolean coercion** — fixed dashboard not updating relay states from live sensor messages. ESP32 sends `1`/`0` integers; the previous `typeof x === "boolean"` check silently ignored them.
+- **LDR chart** — LDR values are now plotted on a dedicated right-side Y axis in the environment history chart.
+- **Dashboard WS status** — status panel now shows live MQTT WebSocket connection state (`Connected` / `Connecting...`).
+- **`GET /api/alerts`** — new endpoint to query the alert log from MongoDB.
+- **ML retrain scheduling** — periodic 6-hour retrain no longer fires on startup before any training data exists. It now starts only after the first debounced retrain triggered by a manual override action.
+- **Dead code removed** — `systemTopicFor` (duplicate of `controlTopicFor`), `isNightHour` (unused export), and `retrainModels` (unused external export) have been removed.
