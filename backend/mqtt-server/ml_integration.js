@@ -1,22 +1,29 @@
-const { spawnSync } = require("child_process");
+const { spawn, spawnSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
-const { PythonShell } = require("python-shell");
 
 const ML_DIR = path.join(__dirname, "../python-ml");
+const ML_SERVER_SCRIPT = path.join(ML_DIR, "ml_server.py");
 const LOCAL_VENV_PYTHON_WINDOWS = path.join(ML_DIR, "venv", "Scripts", "python.exe");
 const LOCAL_VENV_PYTHON_POSIX = path.join(ML_DIR, "venv", "bin", "python");
-const RETRAIN_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+const ML_PORT = Number(process.env.ML_PORT || 5001);
+const ML_BASE = `http://127.0.0.1:${ML_PORT}`;
 const RETRAIN_DEBOUNCE_MS = 5 * 60 * 1000;
+const RETRAIN_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 let retrainTimer = null;
 let retrainIntervalTimer = null;
 let mlUnavailableLogged = false;
+let serverProcess = null;
+let serverReady = false;
+
+// ── Python path resolution ────────────────────────────────────────────────────
 
 function commandExists(command, args = ["--version"]) {
   try {
-    const result = spawnSync(command, args, { encoding: "utf8", stdio: "pipe", shell: false });
-    return !result.error && result.status === 0;
+    const r = spawnSync(command, args, { encoding: "utf8", stdio: "pipe", shell: false });
+    return !r.error && r.status === 0;
   } catch {
     return false;
   }
@@ -34,104 +41,129 @@ function resolvePythonPath() {
 
 const PYTHON_PATH = resolvePythonPath();
 
-function logMlUnavailable() {
-  if (mlUnavailableLogged) return;
-  mlUnavailableLogged = true;
-  console.warn("[ML] Python runtime not found. ML prediction/anomaly/retraining are disabled.");
+// ── Server lifecycle ──────────────────────────────────────────────────────────
+
+async function waitForServer(retries = 20, intervalMs = 500) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const res = await fetch(`${ML_BASE}/status`, { signal: AbortSignal.timeout(1000) });
+      if (res.ok) return true;
+    } catch {}
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  return false;
 }
 
-function runJsonScript(script, args) {
+async function startMlServer() {
   if (!PYTHON_PATH) {
-    logMlUnavailable();
-    return Promise.resolve(null);
+    if (!mlUnavailableLogged) {
+      mlUnavailableLogged = true;
+      console.warn("[ML] Python not found. ML server disabled, fallback rules will be used.");
+    }
+    return;
   }
 
-  return new Promise((resolve, reject) => {
-    try {
-      PythonShell.run(
-        script,
-        {
-          mode: "json",
-          pythonPath: PYTHON_PATH,
-          pythonOptions: PYTHON_PATH === "py" ? ["-3"] : [],
-          scriptPath: ML_DIR,
-          args,
-        },
-        (error, results) => {
-          if (error) { reject(error); return; }
-          resolve(results?.[0] ?? null);
-        }
-      );
-    } catch (error) {
-      reject(error);
+  // Check if already running
+  try {
+    const res = await fetch(`${ML_BASE}/status`, { signal: AbortSignal.timeout(800) });
+    if (res.ok) {
+      console.log("[ML] Server already running.");
+      serverReady = true;
+      return;
+    }
+  } catch {}
+
+  const args = PYTHON_PATH === "py" ? ["-3", ML_SERVER_SCRIPT] : [ML_SERVER_SCRIPT];
+  serverProcess = spawn(PYTHON_PATH, args, {
+    cwd: ML_DIR,
+    env: { ...process.env, ML_PORT: String(ML_PORT) },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  serverProcess.stdout.on("data", (d) => process.stdout.write(`[ML] ${d}`));
+  serverProcess.stderr.on("data", (d) => process.stderr.write(`[ML] ${d}`));
+
+  serverProcess.on("exit", (code) => {
+    serverReady = false;
+    if (code !== 0 && code !== null) {
+      console.warn(`[ML] Server exited with code ${code}. Fallback rules active.`);
     }
   });
+
+  serverReady = await waitForServer();
+  if (serverReady) {
+    console.log(`[ML] Server ready at ${ML_BASE}`);
+  } else {
+    console.warn("[ML] Server did not start in time. Fallback rules active.");
+  }
 }
 
-function toFeatureArgs({ temp, humidity, motion, ldr }) {
-  return [temp ?? 25, humidity ?? 50, motion ? 1 : 0, ldr ?? 500];
+// ── HTTP helpers ──────────────────────────────────────────────────────────────
+
+async function mlPost(endpoint, body) {
+  if (!serverReady) return null;
+  try {
+    const res = await fetch(`${ML_BASE}${endpoint}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(3000),
+    });
+    return res.ok ? await res.json() : null;
+  } catch {
+    return null;
+  }
 }
+
+// ── Public API ────────────────────────────────────────────────────────────────
 
 async function predictDeviceAction(data) {
   try {
-    return await runJsonScript("predict.py", toFeatureArgs(data));
+    return await mlPost("/predict", {
+      temp: data.temp ?? 25,
+      humidity: data.humidity ?? 50,
+      motion: data.motion ? 1 : 0,
+      ldr: data.ldr ?? 500,
+      hour: data.hour ?? new Date().getHours(),
+    });
   } catch (error) {
-    console.warn("[ML] Prediction unavailable:", error.message);
+    console.warn("[ML] Prediction failed:", error.message);
     return null;
   }
 }
 
 async function detectAnomaly(data) {
   try {
-    const result = await runJsonScript("anomaly.py", toFeatureArgs(data));
+    const result = await mlPost("/anomaly", {
+      temp: data.temp ?? 25,
+      humidity: data.humidity ?? 50,
+      motion: data.motion ? 1 : 0,
+      ldr: data.ldr ?? 500,
+    });
     return result ?? { anomaly: false, score: 0 };
   } catch (error) {
-    console.warn("[ML] Anomaly detection unavailable:", error.message);
+    console.warn("[ML] Anomaly detection failed:", error.message);
     return { anomaly: false, score: 0 };
   }
 }
 
-async function retrainModels() {
-  if (!PYTHON_PATH) {
-    logMlUnavailable();
-    return;
-  }
-
-  return new Promise((resolve, reject) => {
-    try {
-      PythonShell.run(
-        "train.py",
-        {
-          pythonPath: PYTHON_PATH,
-          pythonOptions: PYTHON_PATH === "py" ? ["-3"] : [],
-          scriptPath: ML_DIR,
-        },
-        (error) => {
-          if (error) {
-            console.error("[ML] Retrain failed:", error.message);
-            reject(error);
-            return;
-          }
-          console.log("[ML] Models retrained successfully.");
-          resolve();
-        }
-      );
-    } catch (error) {
-      console.error("[ML] Retrain failed:", error.message);
-      reject(error);
-    }
-  });
-}
-
 function scheduleRetrain() {
   if (retrainTimer) clearTimeout(retrainTimer);
-  retrainTimer = setTimeout(() => {
-    retrainModels().catch(() => {});
+  retrainTimer = setTimeout(async () => {
     retrainTimer = null;
-    // Start periodic retrain only after first manual-triggered retrain
+    if (!serverReady) return;
+    try {
+      await mlPost("/retrain", {});
+      console.log("[ML] Retrain triggered after manual action.");
+    } catch {}
+
     if (!retrainIntervalTimer) {
-      retrainIntervalTimer = setInterval(() => {
-        retrainModels().catch(() => {});
+      retrainIntervalTimer = setInterval(async () => {
+        if (!serverReady) return;
+        try {
+          await mlPost("/retrain", {});
+          console.log("[ML] Periodic retrain triggered.");
+        } catch {}
       }, RETRAIN_INTERVAL_MS);
     }
   }, RETRAIN_DEBOUNCE_MS);
@@ -139,12 +171,15 @@ function scheduleRetrain() {
 
 function getMlStatus() {
   return {
-    enabled: Boolean(PYTHON_PATH),
+    enabled: Boolean(PYTHON_PATH) && serverReady,
     pythonPath: PYTHON_PATH,
+    serverUrl: ML_BASE,
+    serverReady,
   };
 }
 
 module.exports = {
+  startMlServer,
   detectAnomaly,
   getMlStatus,
   predictDeviceAction,

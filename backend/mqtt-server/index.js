@@ -12,7 +12,7 @@ const net = require("net");
 const path = require("path");
 const websocketStream = require("websocket-stream");
 
-const { detectAnomaly, getMlStatus, predictDeviceAction, scheduleRetrain } = require("./ml_integration");
+const { startMlServer, detectAnomaly, getMlStatus, predictDeviceAction, scheduleRetrain } = require("./ml_integration");
 const { buildFallbackDecision, loadRules } = require("./rules");
 
 const MQTT_BROKER = process.env.MQTT_BROKER || "mqtt://127.0.0.1:1883";
@@ -850,6 +850,7 @@ async function start() {
   console.log("MongoDB connected");
 
   await hydrateHomeState();
+  await startMlServer();
 
   if (ENABLE_EMBEDDED_BROKER) {
     await waitForBrokerReady(LOCAL_MQTT_PORT);
